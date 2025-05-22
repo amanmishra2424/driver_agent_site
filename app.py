@@ -107,6 +107,73 @@ def get_current_user():
         return get_user_by_id(session['user_id'])
     return None
 
+# Function to get route information from OpenStreetMap (via OSRM)
+def get_route_info(start_lat, start_lon, end_lat, end_lon):
+    """Get route information using OSRM (OpenStreetMap Routing Machine)"""
+    try:
+        # Using the OSRM demo server - for production use your own OSRM instance
+        url = f"https://router.project-osrm.org/route/v1/driving/{start_lon},{start_lat};{end_lon},{end_lat}?overview=false"
+        response = requests.get(url)
+        data = response.json()
+        
+        if data["code"] == "Ok" and len(data["routes"]) > 0:
+            route = data["routes"][0]
+            # Distance in meters, convert to kilometers
+            distance_km = route["distance"] / 1000
+            # Duration in seconds, convert to minutes
+            duration_min = route["duration"] / 60
+            
+            return {
+                "distance": distance_km,
+                "duration": duration_min,
+                "distance_text": f"{distance_km:.1f} km",
+                "duration_text": f"{duration_min:.0f} min"
+            }
+    except Exception as e:
+        print(f"Error getting route: {e}")
+    
+    # Default values if route calculation fails
+    return {
+        "distance": 10,  # Default 10 km
+        "duration": 30,  # Default 30 minutes
+        "distance_text": "10.0 km",
+        "duration_text": "30 min"
+    }
+
+# Function to geocode an address using Nominatim (OpenStreetMap)
+def geocode_address(address):
+    """Convert address to coordinates using Nominatim"""
+    try:
+        # Add a custom user agent as required by Nominatim usage policy
+        headers = {
+            'User-Agent': 'RideBookerApp/1.0'
+        }
+        
+        params = {
+            'q': address,
+            'format': 'json',
+            'limit': 1
+        }
+        
+        response = requests.get('https://nominatim.openstreetmap.org/search', params=params, headers=headers)
+        data = response.json()
+        
+        if data and len(data) > 0:
+            return {
+                'lat': float(data[0]['lat']),
+                'lon': float(data[0]['lon']),
+                'display_name': data[0]['display_name']
+            }
+    except Exception as e:
+        print(f"Geocoding error: {e}")
+    
+    # Default to Mumbai coordinates if geocoding fails
+    return {
+        'lat': 19.0760,
+        'lon': 72.8777,
+        'display_name': 'Mumbai, Maharashtra, India'
+    }
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -114,6 +181,12 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RideBooker - Premium Driver Services</title>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" 
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" 
+          crossorigin=""/>
+    <!-- Leaflet Routing Machine CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
     <style>
         * {
             margin: 0;
@@ -455,6 +528,32 @@ HTML_TEMPLATE = """
             font-size: 14px;
         }
 
+        .address-suggestions {
+            position: absolute;
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            max-height: 200px;
+            overflow-y: auto;
+            width: 100%;
+            z-index: 1000;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+
+        .address-suggestion {
+            padding: 10px 15px;
+            cursor: pointer;
+            border-bottom: 1px solid #eee;
+        }
+
+        .address-suggestion:hover {
+            background: #f5f5f5;
+        }
+
+        .address-input-container {
+            position: relative;
+        }
+
         @media (max-width: 768px) {
             .header h1 { font-size: 2em; }
             .form-grid { grid-template-columns: 1fr; }
@@ -530,11 +629,17 @@ HTML_TEMPLATE = """
                 <div class="form-grid">
                     <div class="form-group">
                         <label for="pickup">Pickup Location</label>
-                        <input type="text" id="pickup" name="pickup" placeholder="Enter pickup address" required>
+                        <div class="address-input-container">
+                            <input type="text" id="pickup" name="pickup" placeholder="Enter pickup address" required>
+                            <div id="pickupSuggestions" class="address-suggestions hidden"></div>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label for="destination">Destination</label>
-                        <input type="text" id="destination" name="destination" placeholder="Enter destination" required>
+                        <div class="address-input-container">
+                            <input type="text" id="destination" name="destination" placeholder="Enter destination" required>
+                            <div id="destinationSuggestions" class="address-suggestions hidden"></div>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label for="date">Date</label>
@@ -671,14 +776,21 @@ HTML_TEMPLATE = """
         </div>
     </div>
 
-    <script src="https://maps.googleapis.com/maps/api/js?key=YOUR_GOOGLE_MAPS_API_KEY&libraries=places&callback=initMap" async defer></script>
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" 
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" 
+            crossorigin=""></script>
+    <!-- Leaflet Routing Machine JS -->
+    <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
     
     <script>
-        let map, directionsService, directionsRenderer;
+        let map, routingControl;
         let currentBookingData = {};
         let estimatedDistance = 0;
         let estimatedDuration = 0;
         let currentAuthMethod = 'email';
+        let pickupCoords = null;
+        let destinationCoords = null;
 
         // Check if user is already logged in
         window.onload = function() {
@@ -747,6 +859,7 @@ HTML_TEMPLATE = """
             document.getElementById('logoutBtn').classList.remove('hidden');
             loadBookings();
             initMap();
+            setupAddressSearch();
         }
 
         async function sendEmailOTP() {
@@ -868,56 +981,281 @@ HTML_TEMPLATE = """
         }
 
         function initMap() {
-            if (!google || !google.maps) return;
+            // Initialize the map centered on Mumbai
+            map = L.map('map').setView([19.0760, 72.8777], 12);
             
-            map = new google.maps.Map(document.getElementById('map'), {
-                zoom: 13,
-                center: { lat: 19.0760, lng: 72.8777 } // Mumbai
+            // Add OpenStreetMap tile layer
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+                maxZoom: 19
+            }).addTo(map);
+            
+            // Initialize routing control (but don't add to map yet)
+            routingControl = L.Routing.control({
+                waypoints: [],
+                routeWhileDragging: false,
+                showAlternatives: false,
+                fitSelectedRoutes: true,
+                lineOptions: {
+                    styles: [{ color: '#6366F1', weight: 6 }]
+                },
+                createMarker: function(i, waypoint, n) {
+                    const marker = L.marker(waypoint.latLng, {
+                        draggable: true,
+                        icon: L.icon({
+                            iconUrl: i === 0 
+                                ? 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png' 
+                                : 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+                            iconSize: [25, 41],
+                            iconAnchor: [12, 41],
+                            popupAnchor: [1, -34],
+                            shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+                            shadowSize: [41, 41]
+                        })
+                    });
+                    return marker;
+                }
             });
-
-            directionsService = new google.maps.DirectionsService();
-            directionsRenderer = new google.maps.DirectionsRenderer();
-            directionsRenderer.setMap(map);
-
-            // Initialize autocomplete for pickup and destination
-            const pickupAutocomplete = new google.maps.places.Autocomplete(document.getElementById('pickup'));
-            const destinationAutocomplete = new google.maps.places.Autocomplete(document.getElementById('destination'));
-
-            // Calculate route when both addresses are entered
-            document.getElementById('pickup').addEventListener('change', calculateRoute);
-            document.getElementById('destination').addEventListener('change', calculateRoute);
-            document.getElementById('carType').addEventListener('change', calculateFare);
-            document.getElementById('tripType').addEventListener('change', calculateFare);
+            
+            // Listen for route calculation events
+            routingControl.on('routesfound', function(e) {
+                const routes = e.routes;
+                const summary = routes[0].summary;
+                
+                // Update distance and duration
+                estimatedDistance = summary.totalDistance / 1000; // Convert to km
+                estimatedDuration = summary.totalTime / 60; // Convert to minutes
+                
+                document.getElementById('distanceDisplay').textContent = `${estimatedDistance.toFixed(1)} km`;
+                document.getElementById('durationDisplay').textContent = `${Math.round(estimatedDuration)} min`;
+                
+                calculateFare();
+                document.getElementById('rateChart').classList.remove('hidden');
+            });
         }
 
-        function calculateRoute() {
-            if (!google || !google.maps || !directionsService) return;
+        function setupAddressSearch() {
+            const pickupInput = document.getElementById('pickup');
+            const destinationInput = document.getElementById('destination');
+            const pickupSuggestions = document.getElementById('pickupSuggestions');
+            const destinationSuggestions = document.getElementById('destinationSuggestions');
             
-            const pickup = document.getElementById('pickup').value;
-            const destination = document.getElementById('destination').value;
-
-            if (pickup && destination) {
-                const request = {
-                    origin: pickup,
-                    destination: destination,
-                    travelMode: google.maps.TravelMode.DRIVING,
+            // Setup debounce function for address search
+            let pickupTimeout = null;
+            let destinationTimeout = null;
+            
+            // Pickup input event listener
+            pickupInput.addEventListener('input', function() {
+                clearTimeout(pickupTimeout);
+                const query = this.value.trim();
+                
+                if (query.length < 3) {
+                    pickupSuggestions.classList.add('hidden');
+                    return;
+                }
+                
+                pickupTimeout = setTimeout(() => {
+                    searchAddress(query, pickupSuggestions, (address) => {
+                        pickupInput.value = address.display_name;
+                        pickupCoords = [address.lat, address.lon];
+                        pickupSuggestions.classList.add('hidden');
+                        updateRoute();
+                    });
+                }, 500);
+            });
+            
+            // Destination input event listener
+            destinationInput.addEventListener('input', function() {
+                clearTimeout(destinationTimeout);
+                const query = this.value.trim();
+                
+                if (query.length < 3) {
+                    destinationSuggestions.classList.add('hidden');
+                    return;
+                }
+                
+                destinationTimeout = setTimeout(() => {
+                    searchAddress(query, destinationSuggestions, (address) => {
+                        destinationInput.value = address.display_name;
+                        destinationCoords = [address.lat, address.lon];
+                        destinationSuggestions.classList.add('hidden');
+                        updateRoute();
+                    });
+                }, 500);
+            });
+            
+            // Hide suggestions when clicking outside
+            document.addEventListener('click', function(e) {
+                if (!pickupInput.contains(e.target) && !pickupSuggestions.contains(e.target)) {
+                    pickupSuggestions.classList.add('hidden');
+                }
+                
+                if (!destinationInput.contains(e.target) && !destinationSuggestions.contains(e.target)) {
+                    destinationSuggestions.classList.add('hidden');
+                }
+            });
+            
+            // Add focus event listeners to show suggestions again if input has value
+            pickupInput.addEventListener('focus', function() {
+                if (this.value.trim().length >= 3) {
+                    searchAddress(this.value.trim(), pickupSuggestions, (address) => {
+                        pickupInput.value = address.display_name;
+                        pickupCoords = [address.lat, address.lon];
+                        pickupSuggestions.classList.add('hidden');
+                        updateRoute();
+                    });
+                }
+            });
+            
+            destinationInput.addEventListener('focus', function() {
+                if (this.value.trim().length >= 3) {
+                    searchAddress(this.value.trim(), destinationSuggestions, (address) => {
+                        destinationInput.value = address.display_name;
+                        destinationCoords = [address.lat, address.lon];
+                        destinationSuggestions.classList.add('hidden');
+                        updateRoute();
+                    });
+                }
+            });
+        }
+        
+        async function searchAddress(query, suggestionsElement, onSelect) {
+            try {
+                // Add a custom user agent as required by Nominatim usage policy
+                const headers = {
+                    'User-Agent': 'RideBookerApp/1.0'
                 };
-
-                directionsService.route(request, (result, status) => {
-                    if (status === 'OK') {
-                        directionsRenderer.setDirections(result);
-                        
-                        const route = result.routes[0];
-                        estimatedDistance = route.legs[0].distance.value / 1000; // Convert to km
-                        estimatedDuration = route.legs[0].duration.value / 60; // Convert to minutes
-
-                        document.getElementById('distanceDisplay').textContent = route.legs[0].distance.text;
-                        document.getElementById('durationDisplay').textContent = route.legs[0].duration.text;
-                        
-                        calculateFare();
-                        document.getElementById('rateChart').classList.remove('hidden');
-                    }
+                
+                const params = new URLSearchParams({
+                    q: query,
+                    format: 'json',
+                    limit: 5
                 });
+                
+                const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, { headers });
+                const data = await response.json();
+                
+                if (data && data.length > 0) {
+                    suggestionsElement.innerHTML = '';
+                    
+                    data.forEach(address => {
+                        const div = document.createElement('div');
+                        div.className = 'address-suggestion';
+                        div.textContent = address.display_name;
+                        div.addEventListener('click', () => {
+                            onSelect(address);
+                        });
+                        suggestionsElement.appendChild(div);
+                    });
+                    
+                    suggestionsElement.classList.remove('hidden');
+                } else {
+                    suggestionsElement.classList.add('hidden');
+                }
+            } catch (error) {
+                console.error('Error searching address:', error);
+                suggestionsElement.classList.add('hidden');
+            }
+        }
+        
+        function updateRoute() {
+            if (pickupCoords && destinationCoords) {
+                // Remove previous routing control if it exists
+                if (routingControl._map) {
+                    map.removeControl(routingControl);
+                }
+                
+                // Create new routing control with the coordinates
+                routingControl = L.Routing.control({
+                    waypoints: [
+                        L.latLng(pickupCoords[0], pickupCoords[1]),
+                        L.latLng(destinationCoords[0], destinationCoords[1])
+                    ],
+                    routeWhileDragging: false,
+                    showAlternatives: false,
+                    fitSelectedRoutes: true,
+                    lineOptions: {
+                        styles: [{ color: '#6366F1', weight: 6 }]
+                    },
+                    createMarker: function(i, waypoint, n) {
+                        const marker = L.marker(waypoint.latLng, {
+                            draggable: true,
+                            icon: L.icon({
+                                iconUrl: i === 0 
+                                    ? 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png' 
+                                    : 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+                                iconSize: [25, 41],
+                                iconAnchor: [12, 41],
+                                popupAnchor: [1, -34],
+                                shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+                                shadowSize: [41, 41]
+                            })
+                        });
+                        return marker;
+                    }
+                }).addTo(map);
+                
+                // Listen for route calculation events
+                routingControl.on('routesfound', function(e) {
+                    const routes = e.routes;
+                    const summary = routes[0].summary;
+                    
+                    // Update distance and duration
+                    estimatedDistance = summary.totalDistance / 1000; // Convert to km
+                    estimatedDuration = summary.totalTime / 60; // Convert to minutes
+                    
+                    document.getElementById('distanceDisplay').textContent = `${estimatedDistance.toFixed(1)} km`;
+                    document.getElementById('durationDisplay').textContent = `${Math.round(estimatedDuration)} min`;
+                    
+                    calculateFare();
+                    document.getElementById('rateChart').classList.remove('hidden');
+                });
+                
+                // If routing fails, use our backend route calculation
+                routingControl.on('routingerror', function(e) {
+                    calculateRouteFromBackend();
+                });
+            }
+        }
+        
+        async function calculateRouteFromBackend() {
+            if (!pickupCoords || !destinationCoords) return;
+            
+            try {
+                const response = await fetch('/calculate_route', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        pickup_lat: pickupCoords[0],
+                        pickup_lon: pickupCoords[1],
+                        destination_lat: destinationCoords[0],
+                        destination_lon: destinationCoords[1]
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    estimatedDistance = data.distance;
+                    estimatedDuration = data.duration;
+                    
+                    document.getElementById('distanceDisplay').textContent = data.distance_text;
+                    document.getElementById('durationDisplay').textContent = data.duration_text;
+                    
+                    calculateFare();
+                    document.getElementById('rateChart').classList.remove('hidden');
+                }
+            } catch (error) {
+                console.error('Error calculating route from backend:', error);
+                // Use default values if backend fails
+                estimatedDistance = 10;
+                estimatedDuration = 30;
+                
+                document.getElementById('distanceDisplay').textContent = '10.0 km';
+                document.getElementById('durationDisplay').textContent = '30 min';
+                
+                calculateFare();
+                document.getElementById('rateChart').classList.remove('hidden');
             }
         }
 
@@ -990,6 +1328,12 @@ HTML_TEMPLATE = """
                 return;
             }
             
+            // Validate addresses
+            if (!pickupCoords || !destinationCoords) {
+                showError('Please select valid pickup and destination addresses');
+                return;
+            }
+            
             searchText.classList.add('hidden');
             searchLoading.classList.remove('hidden');
             submitBtn.disabled = true;
@@ -999,6 +1343,8 @@ HTML_TEMPLATE = """
             currentBookingData.distance = estimatedDistance;
             currentBookingData.duration = estimatedDuration;
             currentBookingData.time = `${startTime} - ${endTime}`;
+            currentBookingData.pickup_coords = pickupCoords;
+            currentBookingData.destination_coords = destinationCoords;
 
             try {
                 const response = await fetch('/search_drivers', {
@@ -1080,6 +1426,13 @@ HTML_TEMPLATE = """
                     document.getElementById('bookingForm').reset();
                     document.getElementById('driversGrid').innerHTML = '';
                     document.getElementById('rateChart').classList.add('hidden');
+                    
+                    // Reset map
+                    if (routingControl._map) {
+                        map.removeControl(routingControl);
+                    }
+                    pickupCoords = null;
+                    destinationCoords = null;
                 } else {
                     showError(result.message || 'Booking failed. Please try again.');
                 }
@@ -1350,6 +1703,32 @@ def verify_otp():
 def logout():
     session.clear()
     return jsonify({'success': True})
+
+@app.route('/calculate_route', methods=['POST'])
+def calculate_route():
+    """Calculate route using OpenStreetMap Routing Machine (OSRM)"""
+    try:
+        data = request.get_json()
+        pickup_lat = data.get('pickup_lat')
+        pickup_lon = data.get('pickup_lon')
+        destination_lat = data.get('destination_lat')
+        destination_lon = data.get('destination_lon')
+        
+        if not all([pickup_lat, pickup_lon, destination_lat, destination_lon]):
+            return jsonify({'success': False, 'message': 'Missing coordinates'})
+        
+        route_info = get_route_info(pickup_lat, pickup_lon, destination_lat, destination_lon)
+        
+        return jsonify({
+            'success': True,
+            'distance': route_info['distance'],
+            'duration': route_info['duration'],
+            'distance_text': route_info['distance_text'],
+            'duration_text': route_info['duration_text']
+        })
+    except Exception as e:
+        print(f"Error calculating route: {e}")
+        return jsonify({'success': False, 'message': 'Failed to calculate route'})
 
 @app.route('/search_drivers', methods=['POST'])
 def search_drivers():
