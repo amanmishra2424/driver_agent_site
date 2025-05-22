@@ -8,20 +8,38 @@ from urllib.parse import quote
 from flask_mail import Mail, Message
 from itsdangerous import URLSafeTimedSerializer
 import os
+from flask_pymongo import PyMongo
+from bson.objectid import ObjectId
+from werkzeug.security import generate_password_hash, check_password_hash
+import secrets
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-change-in-production'
+app.secret_key = secrets.token_hex(16)  # More secure secret key
 
-# In-memory storage (use database in production)
-bookings = []
-otp_storage = {}
-drivers = [
-    {"id": 1, "name": "John Smith", "rating": 4.8, "car": "Toyota Camry", "base_rate": 15, "car_types": ["Manual", "Automatic"]},
-    {"id": 2, "name": "Sarah Johnson", "rating": 4.9, "car": "Honda Accord", "base_rate": 18, "car_types": ["Automatic", "Semi-Automatic"]},
-    {"id": 3, "name": "Mike Wilson", "rating": 4.7, "car": "Tesla Model 3", "base_rate": 35, "car_types": ["Electric"]},
-    {"id": 4, "name": "Emily Davis", "rating": 4.6, "car": "Mercedes C-Class", "base_rate": 40, "car_types": ["Automatic", "Semi-Automatic"]},
-    {"id": 5, "name": "David Brown", "rating": 4.8, "car": "BMW i3", "base_rate": 32, "car_types": ["Electric", "Automatic"]}
-]
+# MongoDB configuration
+app.config['MONGO_URI'] = 'mongodb+srv://print_queue_db:jai_ho@aman.dlsk6.mongodb.net/driver_db?retryWrites=true&w=majority'
+
+try:
+    mongo = PyMongo(app)
+    print("MongoDB connected successfully!")
+except Exception as e:
+    print(f"MongoDB connection error: {e}")
+    mongo = None
+
+# Mail configuration
+app.config['MAIL_SERVER'] = 'smtp.gmail.com'
+app.config['MAIL_PORT'] = 587
+app.config['MAIL_USE_TLS'] = True
+app.config['MAIL_USE_SSL'] = False     # Must be False when USE_TLS=True
+app.config['MAIL_USERNAME'] = 'printech030225@gmail.com'
+app.config['MAIL_PASSWORD'] = 'sbxvawkjjwlaoryi'  # ← Your 16-char App Password
+app.config['MAIL_DEFAULT_SENDER'] = 'printech030225@gmail.com'
+
+mail = Mail(app)
+serializer = URLSafeTimedSerializer(app.secret_key)
+
+# Your WhatsApp number (replace with your actual number)
+ADMIN_WHATSAPP = "+1234567890"  # Replace with your WhatsApp number
 
 # Rate multipliers for different car types
 CAR_TYPE_MULTIPLIERS = {
@@ -31,19 +49,63 @@ CAR_TYPE_MULTIPLIERS = {
     "Electric": 1.5
 }
 
-# Your WhatsApp number (replace with your actual number)
-ADMIN_WHATSAPP = "+1234567890"  # Replace with your WhatsApp number
+# Trip types and their base rates
+TRIP_TYPES = {
+    "Mumbai": 1.0,  # Base rate multiplier for Mumbai trips
+    "Outstation": 1.5  # Higher rate for outstation trips
+}
 
-# Mail configuration
-app.config['MAIL_SERVER'] = 'smtp.gmail.com'
-app.config['MAIL_PORT'] = 587
-app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USERNAME'] = 'printech030225@gmail.com'  # Replace with your Gmail
-app.config['MAIL_PASSWORD'] = 'p@030225'     # Replace with Gmail app password
-app.config['MAIL_DEFAULT_SENDER'] = 'printech030225@gmail.com'
+# Initialize database with sample data if empty
+def init_db():
+    try:
+        if not mongo or not mongo.db:
+            print("MongoDB connection not available")
+            return
+            
+        if mongo.db.drivers.count_documents({}) == 0:
+            sample_drivers = [
+                {"name": "John Smith", "rating": 4.8, "car": "Toyota Camry", "base_rate": 15, "car_types": ["Manual", "Automatic"]},
+                {"name": "Sarah Johnson", "rating": 4.9, "car": "Honda Accord", "base_rate": 18, "car_types": ["Automatic", "Semi-Automatic"]},
+                {"name": "Mike Wilson", "rating": 4.7, "car": "Tesla Model 3", "base_rate": 35, "car_types": ["Electric"]},
+                {"name": "Emily Davis", "rating": 4.6, "car": "Mercedes C-Class", "base_rate": 40, "car_types": ["Automatic", "Semi-Automatic"]},
+                {"name": "David Brown", "rating": 4.8, "car": "BMW i3", "base_rate": 32, "car_types": ["Electric", "Automatic"]}
+            ]
+            
+            mongo.db.drivers.insert_many(sample_drivers)
+            print("Sample drivers added to database")
+    except Exception as e:
+        print(f"Error initializing database: {e}")
 
-mail = Mail(app)
-serializer = URLSafeTimedSerializer(app.secret_key)
+# Call init_db function
+init_db()
+
+def generate_otp():
+    return ''.join(random.choices(string.digits, k=6))
+
+def send_whatsapp_message(phone, message):
+    """Send WhatsApp message using WhatsApp Business API or web URL"""
+    # For demo purposes, we'll create a WhatsApp web URL
+    # In production, integrate with WhatsApp Business API
+    encoded_message = quote(message)
+    whatsapp_url = f"https://wa.me/{phone.replace('+', '')}?text={encoded_message}"
+    return whatsapp_url
+
+def get_user_by_id(user_id):
+    """Get user by ID"""
+    return mongo.db.users.find_one({"_id": ObjectId(user_id)})
+
+def is_authenticated():
+    """Check if user is authenticated"""
+    if 'user_id' in session:
+        user = get_user_by_id(session['user_id'])
+        return user is not None
+    return False
+
+def get_current_user():
+    """Get current user"""
+    if 'user_id' in session:
+        return get_user_by_id(session['user_id'])
+    return None
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -313,6 +375,86 @@ HTML_TEMPLATE = """
             font-size: 14px;
         }
 
+        .auth-options {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .auth-option {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding: 12px;
+            border-radius: 8px;
+            border: 1px solid #ddd;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .auth-option:hover {
+            background: #f5f5f5;
+        }
+
+        .auth-tabs {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #ddd;
+        }
+
+        .auth-tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.3s ease;
+        }
+
+        .auth-tab.active {
+            border-bottom: 2px solid #667eea;
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        .user-profile {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .user-info {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .user-name {
+            font-weight: 600;
+            color: #333;
+        }
+
+        .user-email {
+            font-size: 14px;
+            color: #666;
+        }
+
+        .time-picker {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .time-picker select {
+            flex: 1;
+        }
+
+        .time-label {
+            font-weight: normal;
+            color: #666;
+            font-size: 14px;
+        }
+
         @media (max-width: 768px) {
             .header h1 { font-size: 2em; }
             .form-grid { grid-template-columns: 1fr; }
@@ -336,7 +478,22 @@ HTML_TEMPLATE = """
             <div class="success-message" id="authSuccessMessage"></div>
             <div class="error-message" id="authErrorMessage"></div>
 
-            <div id="phoneSection">
+            <div class="auth-tabs">
+                <div class="auth-tab active" id="emailTab" onclick="switchTab('email')">Email</div>
+                <div class="auth-tab" id="phoneTab" onclick="switchTab('phone')">Phone</div>
+            </div>
+
+            <div id="emailSection">
+                <div class="form-group">
+                    <label for="userEmail">Enter Your Email</label>
+                    <input type="email" id="userEmail" placeholder="example@gmail.com" required>
+                </div>
+                <div style="text-align: center;">
+                    <button class="btn" onclick="sendEmailOTP()">Send OTP</button>
+                </div>
+            </div>
+
+            <div id="phoneSection" class="hidden">
                 <div class="form-group">
                     <label for="phoneNumber">Enter Your Phone Number</label>
                     <input type="tel" id="phoneNumber" placeholder="+1234567890" required>
@@ -356,20 +513,14 @@ HTML_TEMPLATE = """
                     <button class="btn" onclick="resendOTP()" style="margin-left: 10px; background: #6c757d;">Resend OTP</button>
                 </div>
             </div>
-
-            <div id="emailSection" class="hidden">
-                <div class="form-group">
-                    <label for="userEmail">Enter Your Email</label>
-                    <input type="email" id="userEmail" placeholder="example@gmail.com" required>
-                </div>
-                <div style="text-align: center;">
-                    <button class="btn" onclick="sendVerification()">Send Verification Email</button>
-                </div>
-            </div>
         </div>
 
         <!-- Main Booking Section -->
         <div class="booking-section hidden" id="bookingSection">
+            <div class="user-profile" id="userProfile">
+                <!-- User profile will be populated here -->
+            </div>
+            
             <h2 style="margin-bottom: 30px; color: #333; text-align: center;">Find Your Perfect Driver</h2>
             
             <div class="success-message" id="successMessage"></div>
@@ -390,18 +541,80 @@ HTML_TEMPLATE = """
                         <input type="date" id="date" name="date" required>
                     </div>
                     <div class="form-group">
-                        <label for="time">Time</label>
-                        <input type="time" id="time" name="time" required>
+                        <label for="tripType">Trip Type</label>
+                        <select id="tripType" name="tripType" required>
+                            <option value="Mumbai">Mumbai (Local)</option>
+                            <option value="Outstation">Outstation</option>
+                        </select>
                     </div>
                     <div class="form-group">
                         <label for="carType">Car Type</label>
                         <select id="carType" name="carType" required>
-                            <option value="">Select car type</option>
-                            <option value="Manual">Manual (+0% base rate)</option>
+                            <option value="Manual">Manual</option>
                             <option value="Automatic">Automatic (+20% base rate)</option>
                             <option value="Semi-Automatic">Semi-Automatic (+30% base rate)</option>
                             <option value="Electric">Electric Vehicle (+50% base rate)</option>
                         </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Timing</label>
+                        <div class="time-picker">
+                            <select id="startTime" name="startTime" required>
+                                <option value="">From</option>
+                                <option value="00:00">12:00 AM</option>
+                                <option value="01:00">1:00 AM</option>
+                                <option value="02:00">2:00 AM</option>
+                                <option value="03:00">3:00 AM</option>
+                                <option value="04:00">4:00 AM</option>
+                                <option value="05:00">5:00 AM</option>
+                                <option value="06:00">6:00 AM</option>
+                                <option value="07:00">7:00 AM</option>
+                                <option value="08:00">8:00 AM</option>
+                                <option value="09:00">9:00 AM</option>
+                                <option value="10:00">10:00 AM</option>
+                                <option value="11:00">11:00 AM</option>
+                                <option value="12:00">12:00 PM</option>
+                                <option value="13:00">1:00 PM</option>
+                                <option value="14:00">2:00 PM</option>
+                                <option value="15:00">3:00 PM</option>
+                                <option value="16:00">4:00 PM</option>
+                                <option value="17:00">5:00 PM</option>
+                                <option value="18:00">6:00 PM</option>
+                                <option value="19:00">7:00 PM</option>
+                                <option value="20:00">8:00 PM</option>
+                                <option value="21:00">9:00 PM</option>
+                                <option value="22:00">10:00 PM</option>
+                                <option value="23:00">11:00 PM</option>
+                            </select>
+                            <span class="time-label">to</span>
+                            <select id="endTime" name="endTime" required>
+                                <option value="">To</option>
+                                <option value="00:00">12:00 AM</option>
+                                <option value="01:00">1:00 AM</option>
+                                <option value="02:00">2:00 AM</option>
+                                <option value="03:00">3:00 AM</option>
+                                <option value="04:00">4:00 AM</option>
+                                <option value="05:00">5:00 AM</option>
+                                <option value="06:00">6:00 AM</option>
+                                <option value="07:00">7:00 AM</option>
+                                <option value="08:00">8:00 AM</option>
+                                <option value="09:00">9:00 AM</option>
+                                <option value="10:00">10:00 AM</option>
+                                <option value="11:00">11:00 AM</option>
+                                <option value="12:00">12:00 PM</option>
+                                <option value="13:00">1:00 PM</option>
+                                <option value="14:00">2:00 PM</option>
+                                <option value="15:00">3:00 PM</option>
+                                <option value="16:00">4:00 PM</option>
+                                <option value="17:00">5:00 PM</option>
+                                <option value="18:00">6:00 PM</option>
+                                <option value="19:00">7:00 PM</option>
+                                <option value="20:00">8:00 PM</option>
+                                <option value="21:00">9:00 PM</option>
+                                <option value="22:00">10:00 PM</option>
+                                <option value="23:00">11:00 PM</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label for="customerName">Your Name</label>
@@ -428,6 +641,10 @@ HTML_TEMPLATE = """
                     <div class="rate-item">
                         <span>Car Type Multiplier:</span>
                         <span id="multiplierDisplay">-</span>
+                    </div>
+                    <div class="rate-item">
+                        <span>Trip Type Multiplier:</span>
+                        <span id="tripMultiplierDisplay">-</span>
                     </div>
                     <div class="rate-item total-fare">
                         <span>Estimated Total:</span>
@@ -461,11 +678,30 @@ HTML_TEMPLATE = """
         let currentBookingData = {};
         let estimatedDistance = 0;
         let estimatedDuration = 0;
+        let currentAuthMethod = 'email';
 
         // Check if user is already logged in
         window.onload = function() {
             checkAuthStatus();
         };
+
+        function switchTab(tab) {
+            currentAuthMethod = tab;
+            
+            if (tab === 'email') {
+                document.getElementById('emailTab').classList.add('active');
+                document.getElementById('phoneTab').classList.remove('active');
+                document.getElementById('emailSection').classList.remove('hidden');
+                document.getElementById('phoneSection').classList.add('hidden');
+            } else {
+                document.getElementById('emailTab').classList.remove('active');
+                document.getElementById('phoneTab').classList.add('active');
+                document.getElementById('emailSection').classList.add('hidden');
+                document.getElementById('phoneSection').classList.remove('hidden');
+            }
+            
+            document.getElementById('otpSection').classList.add('hidden');
+        }
 
         function checkAuthStatus() {
             fetch('/check_auth')
@@ -473,10 +709,28 @@ HTML_TEMPLATE = """
                 .then(data => {
                     if (data.authenticated) {
                         showMainApp();
+                        if (data.user) {
+                            displayUserProfile(data.user);
+                        }
                     } else {
                         showAuthSection();
                     }
                 });
+        }
+
+        function displayUserProfile(user) {
+            const profileDiv = document.getElementById('userProfile');
+            profileDiv.innerHTML = `
+                <div class="user-info">
+                    <div class="user-name">${user.name || 'User'}</div>
+                    <div class="user-email">${user.email || user.phone || ''}</div>
+                </div>
+            `;
+            
+            // Pre-fill customer name if available
+            if (user.name) {
+                document.getElementById('customerName').value = user.name;
+            }
         }
 
         function showAuthSection() {
@@ -495,6 +749,34 @@ HTML_TEMPLATE = """
             initMap();
         }
 
+        async function sendEmailOTP() {
+            const email = document.getElementById('userEmail').value;
+            if (!email) {
+                showAuthError('Please enter your email');
+                return;
+            }
+
+            try {
+                const response = await fetch('/send_email_otp', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email: email })
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    document.getElementById('emailSection').classList.add('hidden');
+                    document.getElementById('phoneSection').classList.add('hidden');
+                    document.getElementById('otpSection').classList.remove('hidden');
+                    showAuthSuccess('OTP sent successfully! Check your email.');
+                } else {
+                    showAuthError(result.message);
+                }
+            } catch (error) {
+                showAuthError('Failed to send OTP. Please try again.');
+            }
+        }
+
         async function sendOTP() {
             const phoneNumber = document.getElementById('phoneNumber').value;
             if (!phoneNumber) {
@@ -511,6 +793,7 @@ HTML_TEMPLATE = """
 
                 const result = await response.json();
                 if (result.success) {
+                    document.getElementById('emailSection').classList.add('hidden');
                     document.getElementById('phoneSection').classList.add('hidden');
                     document.getElementById('otpSection').classList.remove('hidden');
                     showAuthSuccess('OTP sent successfully! Check your phone.');
@@ -523,25 +806,38 @@ HTML_TEMPLATE = """
         }
 
         async function verifyOTP() {
-            const phoneNumber = document.getElementById('phoneNumber').value;
             const otp = document.getElementById('otpInput').value;
-
             if (!otp || otp.length !== 6) {
                 showAuthError('Please enter a valid 6-digit OTP');
                 return;
+            }
+
+            let data = {};
+            if (currentAuthMethod === 'email') {
+                data = {
+                    email: document.getElementById('userEmail').value,
+                    otp: otp
+                };
+            } else {
+                data = {
+                    phone: document.getElementById('phoneNumber').value,
+                    otp: otp
+                };
             }
 
             try {
                 const response = await fetch('/verify_otp', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ phone: phoneNumber, otp: otp })
+                    body: JSON.stringify(data)
                 });
 
                 const result = await response.json();
                 if (result.success) {
                     showAuthSuccess('Login successful!');
-                    setTimeout(showMainApp, 1000);
+                    setTimeout(() => {
+                        checkAuthStatus();
+                    }, 1000);
                 } else {
                     showAuthError(result.message);
                 }
@@ -551,7 +847,11 @@ HTML_TEMPLATE = """
         }
 
         function resendOTP() {
-            document.getElementById('phoneSection').classList.remove('hidden');
+            if (currentAuthMethod === 'email') {
+                document.getElementById('emailSection').classList.remove('hidden');
+            } else {
+                document.getElementById('phoneSection').classList.remove('hidden');
+            }
             document.getElementById('otpSection').classList.add('hidden');
             document.getElementById('otpInput').value = '';
         }
@@ -561,16 +861,18 @@ HTML_TEMPLATE = """
                 .then(() => {
                     showAuthSection();
                     document.getElementById('phoneNumber').value = '';
+                    document.getElementById('userEmail').value = '';
                     document.getElementById('otpInput').value = '';
-                    document.getElementById('phoneSection').classList.remove('hidden');
-                    document.getElementById('otpSection').classList.add('hidden');
+                    switchTab('email');
                 });
         }
 
         function initMap() {
+            if (!google || !google.maps) return;
+            
             map = new google.maps.Map(document.getElementById('map'), {
                 zoom: 13,
-                center: { lat: 40.7128, lng: -74.0060 } // New York City
+                center: { lat: 19.0760, lng: 72.8777 } // Mumbai
             });
 
             directionsService = new google.maps.DirectionsService();
@@ -585,9 +887,12 @@ HTML_TEMPLATE = """
             document.getElementById('pickup').addEventListener('change', calculateRoute);
             document.getElementById('destination').addEventListener('change', calculateRoute);
             document.getElementById('carType').addEventListener('change', calculateFare);
+            document.getElementById('tripType').addEventListener('change', calculateFare);
         }
 
         function calculateRoute() {
+            if (!google || !google.maps || !directionsService) return;
+            
             const pickup = document.getElementById('pickup').value;
             const destination = document.getElementById('destination').value;
 
@@ -618,14 +923,18 @@ HTML_TEMPLATE = """
 
         function calculateFare() {
             const carType = document.getElementById('carType').value;
-            if (!carType || estimatedDistance === 0) return;
+            const tripType = document.getElementById('tripType').value;
+            
+            if (!carType || !tripType || estimatedDistance === 0) return;
 
             const baseRate = 15; // Base rate per km
-            const multiplier = getCarTypeMultiplier(carType);
-            const totalFare = Math.round(estimatedDistance * baseRate * multiplier);
+            const carMultiplier = getCarTypeMultiplier(carType);
+            const tripMultiplier = getTripTypeMultiplier(tripType);
+            const totalFare = Math.round(estimatedDistance * baseRate * carMultiplier * tripMultiplier);
 
             document.getElementById('baseRateDisplay').textContent = `$${baseRate}/km`;
-            document.getElementById('multiplierDisplay').textContent = `${multiplier}x`;
+            document.getElementById('multiplierDisplay').textContent = `${carMultiplier}x`;
+            document.getElementById('tripMultiplierDisplay').textContent = `${tripMultiplier}x`;
             document.getElementById('totalFareDisplay').textContent = `$${totalFare}`;
         }
 
@@ -638,6 +947,27 @@ HTML_TEMPLATE = """
             };
             return multipliers[carType] || 1.0;
         }
+        
+        function getTripTypeMultiplier(tripType) {
+            const multipliers = {
+                "Mumbai": 1.0,
+                "Outstation": 1.5
+            };
+            return multipliers[tripType] || 1.0;
+        }
+
+        // Validate time selection
+        document.getElementById('endTime').addEventListener('change', function() {
+            const startTime = document.getElementById('startTime').value;
+            const endTime = this.value;
+            
+            if (startTime && endTime) {
+                if (startTime >= endTime) {
+                    showError('End time must be after start time');
+                    this.value = '';
+                }
+            }
+        });
 
         document.getElementById('bookingForm').addEventListener('submit', async function(e) {
             e.preventDefault();
@@ -645,6 +975,20 @@ HTML_TEMPLATE = """
             const submitBtn = document.querySelector('.btn');
             const searchText = document.getElementById('searchText');
             const searchLoading = document.getElementById('searchLoading');
+            
+            // Validate time selection
+            const startTime = document.getElementById('startTime').value;
+            const endTime = document.getElementById('endTime').value;
+            
+            if (!startTime || !endTime) {
+                showError('Please select both start and end times');
+                return;
+            }
+            
+            if (startTime >= endTime) {
+                showError('End time must be after start time');
+                return;
+            }
             
             searchText.classList.add('hidden');
             searchLoading.classList.remove('hidden');
@@ -654,6 +998,7 @@ HTML_TEMPLATE = """
             currentBookingData = Object.fromEntries(formData);
             currentBookingData.distance = estimatedDistance;
             currentBookingData.duration = estimatedDuration;
+            currentBookingData.time = `${startTime} - ${endTime}`;
 
             try {
                 const response = await fetch('/search_drivers', {
@@ -677,10 +1022,17 @@ HTML_TEMPLATE = """
             const grid = document.getElementById('driversGrid');
             grid.innerHTML = '';
 
+            if (drivers.length === 0) {
+                grid.innerHTML = '<p style="text-align: center; grid-column: 1/-1; color: #666;">No drivers available for the selected car type. Please try a different car type.</p>';
+                return;
+            }
+
             drivers.forEach(driver => {
                 const carType = currentBookingData.carType;
-                const multiplier = getCarTypeMultiplier(carType);
-                const hourlyRate = Math.round(driver.base_rate * multiplier);
+                const tripType = currentBookingData.tripType;
+                const carMultiplier = getCarTypeMultiplier(carType);
+                const tripMultiplier = getTripTypeMultiplier(tripType);
+                const hourlyRate = Math.round(driver.base_rate * carMultiplier * tripMultiplier);
                 
                 if (driver.car_types.includes(carType)) {
                     const driverCard = document.createElement('div');
@@ -698,7 +1050,7 @@ HTML_TEMPLATE = """
                             <div class="price">$${hourlyRate}/hour</div>
                             <div style="font-size: 14px; color: #888;">Supports: ${driver.car_types.join(', ')}</div>
                         </div>
-                        <button class="book-btn" onclick="bookDriver(${driver.id})">
+                        <button class="book-btn" onclick="bookDriver('${driver._id}')">
                             Book This Driver
                         </button>
                     `;
@@ -757,16 +1109,18 @@ HTML_TEMPLATE = """
             bookingsList.innerHTML = bookings.map(booking => `
                 <div class="booking-item">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                        <strong>Booking #${booking.id}</strong>
-                        <span style="background: #d4edda; color: #155724; padding: 5px 15px; border-radius: 20px; font-size: 12px; font-weight: 600;">CONFIRMED</span>
+                        <strong>Booking #${booking._id.substring(0, 8)}</strong>
+                        <span style="background: #d4edda; color: #155724; padding: 5px 15px; border-radius: 20px; font-size: 12px; font-weight: 600;">${booking.status.toUpperCase()}</span>
                     </div>
-                    <div><strong>Driver:</strong> ${booking.driverName}</div>
+                    <div><strong>Driver:</strong> ${booking.driver_name}</div>
                     <div><strong>From:</strong> ${booking.pickup}</div>
                     <div><strong>To:</strong> ${booking.destination}</div>
-                    <div><strong>Date & Time:</strong> ${booking.date} at ${booking.time}</div>
-                    <div><strong>Car Type:</strong> ${booking.carType}</div>
-                    <div><strong>Customer:</strong> ${booking.customerName}</div>
+                    <div><strong>Date:</strong> ${booking.date}</div>
+                    <div><strong>Time:</strong> ${booking.time}</div>
+                    <div><strong>Trip Type:</strong> ${booking.tripType || 'N/A'}</div>
+                    <div><strong>Car Type:</strong> ${booking.car_type}</div>
                     <div><strong>Distance:</strong> ${booking.distance ? booking.distance.toFixed(1) + ' km' : 'N/A'}</div>
+                    <div><strong>Estimated Fare:</strong> $${booking.estimated_fare || 'N/A'}</div>
                 </div>
             `).join('');
         }
@@ -805,46 +1159,10 @@ HTML_TEMPLATE = """
 
         // Set minimum date to today
         document.getElementById('date').min = new Date().toISOString().split('T')[0];
-
-        async function sendVerification() {
-            const email = document.getElementById('userEmail').value;
-            if (!email) {
-                showAuthError('Please enter your email');
-                return;
-            }
-
-            try {
-                const response = await fetch('/send_verification', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ email: email })
-                });
-
-                const result = await response.json();
-                if (result.success) {
-                    showAuthSuccess('Verification email sent! Please check your inbox.');
-                } else {
-                    showAuthError(result.message);
-                }
-            } catch (error) {
-                showAuthError('Failed to send verification email. Please try again.');
-            }
-        }
     </script>
 </body>
 </html>
 """
-
-def generate_otp():
-    return ''.join(random.choices(string.digits, k=6))
-
-def send_whatsapp_message(phone, message):
-    """Send WhatsApp message using WhatsApp Business API or web URL"""
-    # For demo purposes, we'll create a WhatsApp web URL
-    # In production, integrate with WhatsApp Business API
-    encoded_message = quote(message)
-    whatsapp_url = f"https://wa.me/{phone.replace('+', '')}?text={encoded_message}"
-    return whatsapp_url
 
 @app.route('/')
 def index():
@@ -852,7 +1170,66 @@ def index():
 
 @app.route('/check_auth')
 def check_auth():
-    return jsonify({'authenticated': session.get('authenticated', False)})
+    user = get_current_user()
+    if user:
+        return jsonify({
+            'authenticated': True,
+            'user': {
+                'id': str(user['_id']),
+                'name': user.get('name'),
+                'email': user.get('email'),
+                'phone': user.get('phone')
+            }
+        })
+    return jsonify({'authenticated': False})
+
+@app.route('/send_email_otp', methods=['POST'])
+def send_email_otp():
+    try:
+        data = request.get_json()
+        email = data.get('email')
+        
+        if not email:
+            return jsonify({'success': False, 'message': 'Email is required'})
+        
+        # Generate OTP
+        otp_code = generate_otp()
+        
+        # Check if OTP already exists for this email
+        existing_otp = mongo.db.otps.find_one({'email': email})
+        if existing_otp:
+            mongo.db.otps.update_one(
+                {'email': email},
+                {'$set': {
+                    'otp': otp_code,
+                    'timestamp': datetime.utcnow(),
+                    'attempts': 0
+                }}
+            )
+        else:
+            mongo.db.otps.insert_one({
+                'email': email,
+                'otp': otp_code,
+                'timestamp': datetime.utcnow(),
+                'attempts': 0
+            })
+        
+        # Send email with OTP
+        msg = Message('Your RideBooker OTP Code',
+                     recipients=[email],
+                     body=f'Your OTP code for RideBooker is: {otp_code}\n\nThis code will expire in 5 minutes.')
+        
+        mail.send(msg)
+        
+        return jsonify({
+            'success': True, 
+            'message': f'OTP sent to {email}',
+            'debug_otp': otp_code  # Remove this in production
+        })
+        
+    except Exception as e:
+        print(f"Error sending email OTP: {str(e)}")
+        return jsonify({'success': False, 'message': 'Failed to send OTP'})
 
 @app.route('/send_otp', methods=['POST'])
 def send_otp():
@@ -863,60 +1240,110 @@ def send_otp():
         if not phone:
             return jsonify({'success': False, 'message': 'Phone number is required'})
         
-        # Generate and store OTP
-        otp = generate_otp()
-        otp_storage[phone] = {
-            'otp': otp,
-            'timestamp': datetime.now(),
-            'attempts': 0
-        }
+        # Generate OTP
+        otp_code = generate_otp()
+        
+        # Check if OTP already exists for this phone
+        existing_otp = mongo.db.otps.find_one({'phone': phone})
+        if existing_otp:
+            mongo.db.otps.update_one(
+                {'phone': phone},
+                {'$set': {
+                    'otp': otp_code,
+                    'timestamp': datetime.utcnow(),
+                    'attempts': 0
+                }}
+            )
+        else:
+            mongo.db.otps.insert_one({
+                'phone': phone,
+                'otp': otp_code,
+                'timestamp': datetime.utcnow(),
+                'attempts': 0
+            })
         
         # In production, integrate with SMS service like Twilio
         # For demo purposes, we'll just log the OTP
-        print(f"OTP for {phone}: {otp}")
+        print(f"OTP for {phone}: {otp_code}")
         
         return jsonify({
             'success': True, 
             'message': f'OTP sent to {phone}',
-            'debug_otp': otp  # Remove this in production
+            'debug_otp': otp_code  # Remove this in production
         })
         
     except Exception as e:
+        print(f"Error sending OTP: {str(e)}")
         return jsonify({'success': False, 'message': 'Failed to send OTP'})
 
 @app.route('/verify_otp', methods=['POST'])
 def verify_otp():
     try:
         data = request.get_json()
+        email = data.get('email')
         phone = data.get('phone')
         entered_otp = data.get('otp')
         
-        if phone not in otp_storage:
+        if not entered_otp:
+            return jsonify({'success': False, 'message': 'OTP is required'})
+        
+        # Find OTP in database
+        otp_record = None
+        if email:
+            otp_record = mongo.db.otps.find_one({'email': email})
+        elif phone:
+            otp_record = mongo.db.otps.find_one({'phone': phone})
+        
+        if not otp_record:
             return jsonify({'success': False, 'message': 'OTP not found or expired'})
         
-        stored_data = otp_storage[phone]
-        
         # Check if OTP is expired (5 minutes)
-        if datetime.now() - stored_data['timestamp'] > timedelta(minutes=5):
-            del otp_storage[phone]
+        if datetime.utcnow() - otp_record['timestamp'] > timedelta(minutes=5):
+            mongo.db.otps.delete_one({'_id': otp_record['_id']})
             return jsonify({'success': False, 'message': 'OTP expired'})
         
         # Check attempts
-        if stored_data['attempts'] >= 3:
-            del otp_storage[phone]
+        if otp_record['attempts'] >= 3:
+            mongo.db.otps.delete_one({'_id': otp_record['_id']})
             return jsonify({'success': False, 'message': 'Too many failed attempts'})
         
         # Verify OTP
-        if stored_data['otp'] == entered_otp:
-            session['authenticated'] = True
-            session['phone'] = phone
-            del otp_storage[phone]
+        if otp_record['otp'] == entered_otp:
+            # Check if user exists
+            user = None
+            if email:
+                user = mongo.db.users.find_one({'email': email})
+                if not user:
+                    user_id = mongo.db.users.insert_one({
+                        'email': email,
+                        'created_at': datetime.utcnow()
+                    }).inserted_id
+                    user = mongo.db.users.find_one({'_id': user_id})
+            elif phone:
+                user = mongo.db.users.find_one({'phone': phone})
+                if not user:
+                    user_id = mongo.db.users.insert_one({
+                        'phone': phone,
+                        'created_at': datetime.utcnow()
+                    }).inserted_id
+                    user = mongo.db.users.find_one({'_id': user_id})
+            
+            # Set user in session
+            session['user_id'] = str(user['_id'])
+            
+            # Delete the OTP record
+            mongo.db.otps.delete_one({'_id': otp_record['_id']})
+            
             return jsonify({'success': True, 'message': 'Login successful'})
         else:
-            stored_data['attempts'] += 1
+            mongo.db.otps.update_one(
+                {'_id': otp_record['_id']},
+                {'$inc': {'attempts': 1}}
+            )
             return jsonify({'success': False, 'message': 'Invalid OTP'})
             
     except Exception as e:
+        print(f"Error verifying OTP: {str(e)}")
         return jsonify({'success': False, 'message': 'Verification failed'})
 
 @app.route('/logout', methods=['POST'])
@@ -924,63 +1351,26 @@ def logout():
     session.clear()
     return jsonify({'success': True})
 
-@app.route('/send_verification', methods=['POST'])
-def send_verification():
-    try:
-        data = request.get_json()
-        email = data.get('email')
-        
-        if not email:
-            return jsonify({'success': False, 'message': 'Email is required'})
-        
-        # Generate token
-        token = serializer.dumps(email, salt='email-verify')
-        
-        # Create verification link
-        verification_link = url_for('verify_email', token=token, _external=True)
-        
-        # Send email
-        msg = Message('Verify Your Email',
-                     recipients=[email],
-                     body=f'Click the following link to verify your email: {verification_link}')
-        
-        mail.send(msg)
-        
-        return jsonify({
-            'success': True, 
-            'message': f'Verification email sent to {email}'
-        })
-        
-    except Exception as e:
-        print(f"Error sending email: {str(e)}")
-        return jsonify({'success': False, 'message': 'Failed to send verification email'})
-
-@app.route('/verify_email/<token>')
-def verify_email(token):
-    try:
-        email = serializer.loads(token, salt='email-verify', max_age=3600)  # 1 hour expiry
-        session['authenticated'] = True
-        session['email'] = email
-        return redirect('/')
-    except:
-        return 'Invalid or expired verification link', 400
-
 @app.route('/search_drivers', methods=['POST'])
 def search_drivers():
-    if not session.get('authenticated'):
+    if not is_authenticated():
         return jsonify({'error': 'Not authenticated'}), 401
     
     data = request.get_json()
     car_type = data.get('carType')
     
     # Filter drivers based on car type availability
-    available_drivers = [d for d in drivers if car_type in d.get('car_types', [])]
+    drivers = list(mongo.db.drivers.find({'car_types': car_type}))
     
-    return jsonify(available_drivers)
+    # Convert ObjectId to string for JSON serialization
+    for driver in drivers:
+        driver['_id'] = str(driver['_id'])
+    
+    return jsonify(drivers)
 
 @app.route('/book_driver', methods=['POST'])
 def book_driver():
-    if not session.get('authenticated'):
+    if not is_authenticated():
         return jsonify({'error': 'Not authenticated'}), 401
         
     try:
@@ -988,50 +1378,55 @@ def book_driver():
         driver_id = data.get('driverId')
         
         # Find the driver
-        driver = next((d for d in drivers if d['id'] == driver_id), None)
+        driver = mongo.db.drivers.find_one({'_id': ObjectId(driver_id)})
         if not driver:
             return jsonify({'success': False, 'message': 'Driver not found'})
         
+        # Get current user
+        user = get_current_user()
+        
         # Calculate fare
         car_type = data.get('carType')
+        trip_type = data.get('tripType')
         distance = data.get('distance', 0)
-        multiplier = CAR_TYPE_MULTIPLIERS.get(car_type, 1.0)
-        estimated_fare = round(distance * driver['base_rate'] * multiplier) if distance else 0
+        car_multiplier = CAR_TYPE_MULTIPLIERS.get(car_type, 1.0)
+        trip_multiplier = TRIP_TYPES.get(trip_type, 1.0)
+        estimated_fare = round(distance * driver['base_rate'] * car_multiplier * trip_multiplier) if distance else 0
         
         # Create booking
-        booking_id = len(bookings) + 1
         booking = {
-            'id': booking_id,
-            'driverId': driver_id,
-            'driverName': driver['name'],
+            'user_id': user['_id'],
+            'driver_id': ObjectId(driver_id),
+            'driver_name': driver['name'],
             'pickup': data['pickup'],
             'destination': data['destination'],
             'date': data['date'],
             'time': data['time'],
-            'carType': data['carType'],
-            'customerName': data['customerName'],
-            'customerPhone': session.get('phone'),
+            'car_type': data['carType'],
+            'tripType': data['tripType'],
             'distance': distance,
             'duration': data.get('duration', 0),
-            'estimatedFare': estimated_fare,
+            'estimated_fare': estimated_fare,
             'status': 'confirmed',
-            'timestamp': datetime.now().isoformat()
+            'created_at': datetime.utcnow()
         }
         
-        bookings.append(booking)
+        booking_id = mongo.db.bookings.insert_one(booking).inserted_id
         
         # Send WhatsApp notification to admin
         whatsapp_message = f"""🚗 NEW DRIVER BOOKING REQUEST
 
 📋 Booking ID: {booking_id}
 👤 Customer: {data['customerName']}
-📱 Phone: {session.get('phone')}
+📱 Phone: {user.get('phone', 'N/A')}
+📧 Email: {user.get('email', 'N/A')}
 🚗 Driver: {driver['name']}
 🏠 Pickup: {data['pickup']}
 🎯 Destination: {data['destination']}
 📅 Date: {data['date']}
 ⏰ Time: {data['time']}
 🚙 Car Type: {data['carType']}
+🌍 Trip Type: {data['tripType']}
 📏 Distance: {distance:.1f} km
 💰 Estimated Fare: ${estimated_fare}
 
@@ -1042,9 +1437,34 @@ Please confirm this booking with the customer and driver."""
         print(f"WhatsApp notification URL: {whatsapp_url}")
         print(f"Message: {whatsapp_message}")
         
+        # Send confirmation email if user has email
+        if user.get('email'):
+            try:
+                msg = Message('Your RideBooker Booking Confirmation',
+                            recipients=[user['email']],
+                            body=f"""Hello {data['customerName']},
+
+Your booking has been confirmed!
+
+Booking ID: {booking_id}
+Driver: {driver['name']}
+Pickup: {data['pickup']}
+Destination: {data['destination']}
+Date: {data['date']}
+Time: {data['time']}
+Car Type: {data['carType']}
+Trip Type: {data['tripType']}
+Estimated Fare: ${estimated_fare}
+
+Thank you for using RideBooker!
+""")
+                mail.send(msg)
+            except Exception as e:
+                print(f"Error sending confirmation email: {str(e)}")
+        
         return jsonify({
             'success': True,
-            'bookingId': booking_id,
+            'bookingId': str(booking_id),
             'message': 'Booking confirmed successfully!',
             'whatsapp_url': whatsapp_url  # You can use this to open WhatsApp
         })
@@ -1058,14 +1478,24 @@ Please confirm this booking with the customer and driver."""
 
 @app.route('/get_bookings', methods=['GET'])
 def get_bookings():
-    if not session.get('authenticated'):
+    if not is_authenticated():
         return jsonify({'error': 'Not authenticated'}), 401
     
-    # Filter bookings for current user
-    user_phone = session.get('phone')
-    user_bookings = [b for b in bookings if b.get('customerPhone') == user_phone]
+    # Get current user
+    user = get_current_user()
     
-    return jsonify(user_bookings)
+    # Get bookings for current user
+    bookings = list(mongo.db.bookings.find({'user_id': user['_id']}).sort('created_at', -1))
+    
+    # Convert ObjectId to string for JSON serialization
+    for booking in bookings:
+        booking['_id'] = str(booking['_id'])
+        booking['user_id'] = str(booking['user_id'])
+        booking['driver_id'] = str(booking['driver_id'])
+        # Convert datetime to string
+        booking['created_at'] = booking['created_at'].isoformat()
+    
+    return jsonify(bookings)
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5000)
