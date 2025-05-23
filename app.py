@@ -10,7 +10,6 @@ from itsdangerous import URLSafeTimedSerializer
 import os
 from flask_pymongo import PyMongo
 from bson.objectid import ObjectId
-from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
 
 app = Flask(__name__)
@@ -41,18 +40,23 @@ serializer = URLSafeTimedSerializer(app.secret_key)
 # Your WhatsApp number (replace with your actual number)
 ADMIN_WHATSAPP = "+1234567890"  # Replace with your WhatsApp number
 
-# Rate multipliers for different car types
-CAR_TYPE_MULTIPLIERS = {
-    "Manual": 1.0,
-    "Automatic": 1.2,
-    "Semi-Automatic": 1.3,
-    "Electric": 1.5
-}
-
-# Trip types and their base rates
-TRIP_TYPES = {
-    "Mumbai": 1.0,  # Base rate multiplier for Mumbai trips
-    "Outstation": 1.5  # Higher rate for outstation trips
+# New pricing structure
+PRICING = {
+    "hourly": {
+        "base_rate": 800,  # 800₹ for 8 hours
+        "overtime_rate": 100,  # 100₹ per hour (7am-10pm)
+        "night_food_charge": 200,  # Additional 200₹ after 10pm for food
+        "night_travel_charge": 100  # Additional 100₹ after 12am for travel
+    },
+    "outstation": {
+        "overnight": 1500,  # 1200₹ + 300₹ food expense
+        "same_day": 1800  # Fixed rate for same-day return
+    },
+    "pickup_drop": {
+        "above_100km": 1300,  # Base rate for >100km + travel charges
+        "60_to_100km": 1000,  # Fixed rate for 60-100km
+        "below_60km": 800  # Fixed rate for <60km
+    }
 }
 
 # Initialize database with sample data if empty
@@ -64,11 +68,11 @@ def init_db():
             
         if mongo.db.drivers.count_documents({}) == 0:
             sample_drivers = [
-                {"name": "John Smith", "rating": 4.8, "car": "Toyota Camry", "base_rate": 15, "car_types": ["Manual", "Automatic"]},
-                {"name": "Sarah Johnson", "rating": 4.9, "car": "Honda Accord", "base_rate": 18, "car_types": ["Automatic", "Semi-Automatic"]},
-                {"name": "Mike Wilson", "rating": 4.7, "car": "Tesla Model 3", "base_rate": 35, "car_types": ["Electric"]},
-                {"name": "Emily Davis", "rating": 4.6, "car": "Mercedes C-Class", "base_rate": 40, "car_types": ["Automatic", "Semi-Automatic"]},
-                {"name": "David Brown", "rating": 4.8, "car": "BMW i3", "base_rate": 32, "car_types": ["Electric", "Automatic"]}
+                {"name": "John Smith", "rating": 4.8, "car_types": ["Manual", "Automatic"]},
+                {"name": "Sarah Johnson", "rating": 4.9, "car_types": ["Automatic", "Semi-Automatic"]},
+                {"name": "Mike Wilson", "rating": 4.7, "car_types": ["Electric"]},
+                {"name": "Emily Davis", "rating": 4.6, "car_types": ["Automatic", "Semi-Automatic"]},
+                {"name": "David Brown", "rating": 4.8, "car_types": ["Electric", "Automatic"]}
             ]
             
             mongo.db.drivers.insert_many(sample_drivers)
@@ -173,6 +177,83 @@ def geocode_address(address):
         'lon': 72.8777,
         'display_name': 'Mumbai, Maharashtra, India'
     }
+
+# Calculate fare based on booking type and parameters
+def calculate_fare(booking_type, distance, duration, start_time, end_time):
+    """Calculate fare based on booking type and parameters"""
+    try:
+        if booking_type == "hourly":
+            # Base rate for 8 hours
+            fare = PRICING["hourly"]["base_rate"]
+            
+            # Calculate total hours
+            start_hour = int(start_time.split(":")[0])
+            end_hour = int(end_time.split(":")[0])
+            
+            # Handle overnight bookings
+            if end_hour < start_hour:
+                end_hour += 24
+                
+            total_hours = end_hour - start_hour
+            
+            # Calculate overtime charges
+            if total_hours > 8:
+                overtime_hours = total_hours - 8
+                
+                # Regular overtime (7am-10pm)
+                overtime_charge = overtime_hours * PRICING["hourly"]["overtime_rate"]
+                
+                # Check for night charges (after 10pm)
+                if end_hour >= 22:  # 10pm or later
+                    # Add food charge
+                    overtime_charge += PRICING["hourly"]["night_food_charge"]
+                    
+                    # Check for late night charges (after 12am)
+                    if end_hour >= 24:  # 12am or later
+                        overtime_charge += PRICING["hourly"]["night_travel_charge"]
+                
+                fare += overtime_charge
+                
+            return {
+                "base_fare": PRICING["hourly"]["base_rate"],
+                "overtime_charge": fare - PRICING["hourly"]["base_rate"] if fare > PRICING["hourly"]["base_rate"] else 0,
+                "total_fare": fare
+            }
+            
+        elif booking_type == "outstation":
+            if "overnight" in booking_type.lower():
+                return {
+                    "base_fare": PRICING["outstation"]["overnight"],
+                    "total_fare": PRICING["outstation"]["overnight"]
+                }
+            else:  # Same day return
+                return {
+                    "base_fare": PRICING["outstation"]["same_day"],
+                    "total_fare": PRICING["outstation"]["same_day"]
+                }
+                
+        elif booking_type == "pickup_drop":
+            if distance > 100:
+                # Base rate + travel charges (calculated as distance * rate)
+                travel_charge = (distance - 100) * 10  # Assuming 10₹ per km for additional distance
+                return {
+                    "base_fare": PRICING["pickup_drop"]["above_100km"],
+                    "travel_charge": travel_charge,
+                    "total_fare": PRICING["pickup_drop"]["above_100km"] + travel_charge
+                }
+            elif distance > 60:
+                return {
+                    "base_fare": PRICING["pickup_drop"]["60_to_100km"],
+                    "total_fare": PRICING["pickup_drop"]["60_to_100km"]
+                }
+            else:
+                return {
+                    "base_fare": PRICING["pickup_drop"]["below_60km"],
+                    "total_fare": PRICING["pickup_drop"]["below_60km"]
+                }
+    except Exception as e:
+        print(f"Error calculating fare: {e}")
+        return {"total_fare": 1000}  # Default fare if calculation fails
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -554,11 +635,55 @@ HTML_TEMPLATE = """
             position: relative;
         }
 
+        .booking-type-tabs {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #ddd;
+            overflow-x: auto;
+            padding-bottom: 5px;
+        }
+
+        .booking-type-tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.3s ease;
+            white-space: nowrap;
+        }
+
+        .booking-type-tab.active {
+            border-bottom: 2px solid #667eea;
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        .pricing-info {
+            background: #f0f4ff;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            border-left: 4px solid #667eea;
+        }
+
+        .pricing-info h3 {
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .pricing-info ul {
+            padding-left: 20px;
+        }
+
+        .pricing-info li {
+            margin-bottom: 5px;
+        }
+
         @media (max-width: 768px) {
             .header h1 { font-size: 2em; }
             .form-grid { grid-template-columns: 1fr; }
             .drivers-grid { grid-template-columns: 1fr; }
             .auth-section, .booking-section, .bookings-section { padding: 20px; }
+            .booking-type-tabs { flex-wrap: nowrap; }
         }
     </style>
 </head>
@@ -625,7 +750,51 @@ HTML_TEMPLATE = """
             <div class="success-message" id="successMessage"></div>
             <div class="error-message" id="errorMessage"></div>
 
+            <div class="booking-type-tabs">
+                <div class="booking-type-tab active" id="hourlyTab" onclick="switchBookingType('hourly')">Hourly Basis</div>
+                <div class="booking-type-tab" id="outstationOvernightTab" onclick="switchBookingType('outstation_overnight')">Outstation (Overnight)</div>
+                <div class="booking-type-tab" id="outstationSameDayTab" onclick="switchBookingType('outstation_same_day')">Outstation (Same Day)</div>
+                <div class="booking-type-tab" id="pickupDropTab" onclick="switchBookingType('pickup_drop')">Pickup & Drop</div>
+            </div>
+
+            <div class="pricing-info" id="hourlyPricingInfo">
+                <h3>Hourly Booking Rates</h3>
+                <ul>
+                    <li>Base rate: ₹800 for 8 hours</li>
+                    <li>Overtime: ₹100/hour (7:00 AM - 10:00 PM)</li>
+                    <li>After 10:00 PM: Additional ₹200 for food</li>
+                    <li>After 12:00 AM: Additional ₹100 for travel</li>
+                </ul>
+            </div>
+
+            <div class="pricing-info hidden" id="outstationOvernightPricingInfo">
+                <h3>Outstation Overnight Rates</h3>
+                <ul>
+                    <li>Base rate: ₹1200</li>
+                    <li>Food expense: ₹300</li>
+                    <li>Total: ₹1500 per day</li>
+                </ul>
+            </div>
+
+            <div class="pricing-info hidden" id="outstationSameDayPricingInfo">
+                <h3>Outstation Same-Day Return Rates</h3>
+                <ul>
+                    <li>Fixed rate: ₹1800</li>
+                </ul>
+            </div>
+
+            <div class="pricing-info hidden" id="pickupDropPricingInfo">
+                <h3>Pickup & Drop Rates</h3>
+                <ul>
+                    <li>Distance > 100 km: ₹1300 + travel charges</li>
+                    <li>Distance 60-100 km: ₹1000 (fixed)</li>
+                    <li>Distance < 60 km: ₹800 (fixed)</li>
+                </ul>
+            </div>
+
             <form id="bookingForm">
+                <input type="hidden" id="bookingType" name="bookingType" value="hourly">
+                
                 <div class="form-grid">
                     <div class="form-group">
                         <label for="pickup">Pickup Location</label>
@@ -646,19 +815,12 @@ HTML_TEMPLATE = """
                         <input type="date" id="date" name="date" required>
                     </div>
                     <div class="form-group">
-                        <label for="tripType">Trip Type</label>
-                        <select id="tripType" name="tripType" required>
-                            <option value="Mumbai">Mumbai (Local)</option>
-                            <option value="Outstation">Outstation</option>
-                        </select>
-                    </div>
-                    <div class="form-group">
                         <label for="carType">Car Type</label>
                         <select id="carType" name="carType" required>
                             <option value="Manual">Manual</option>
-                            <option value="Automatic">Automatic (+20% base rate)</option>
-                            <option value="Semi-Automatic">Semi-Automatic (+30% base rate)</option>
-                            <option value="Electric">Electric Vehicle (+50% base rate)</option>
+                            <option value="Automatic">Automatic</option>
+                            <option value="Semi-Automatic">Semi-Automatic</option>
+                            <option value="Electric">Electric Vehicle</option>
                         </select>
                     </div>
                     <div class="form-group">
@@ -725,6 +887,10 @@ HTML_TEMPLATE = """
                         <label for="customerName">Your Name</label>
                         <input type="text" id="customerName" name="customerName" placeholder="Enter your name" required>
                     </div>
+                    <div class="form-group">
+                        <label for="customerPhone">Your Phone Number</label>
+                        <input type="tel" id="customerPhone" name="customerPhone" placeholder="Enter your phone number" required>
+                    </div>
                 </div>
 
                 <div id="map"></div>
@@ -743,13 +909,9 @@ HTML_TEMPLATE = """
                         <span>Base Rate:</span>
                         <span id="baseRateDisplay">-</span>
                     </div>
-                    <div class="rate-item">
-                        <span>Car Type Multiplier:</span>
-                        <span id="multiplierDisplay">-</span>
-                    </div>
-                    <div class="rate-item">
-                        <span>Trip Type Multiplier:</span>
-                        <span id="tripMultiplierDisplay">-</span>
+                    <div class="rate-item" id="additionalChargesRow">
+                        <span id="additionalChargesLabel">Additional Charges:</span>
+                        <span id="additionalChargesDisplay">-</span>
                     </div>
                     <div class="rate-item total-fare">
                         <span>Estimated Total:</span>
@@ -791,6 +953,7 @@ HTML_TEMPLATE = """
         let currentAuthMethod = 'email';
         let pickupCoords = null;
         let destinationCoords = null;
+        let currentBookingType = 'hourly';
 
         // Check if user is already logged in
         window.onload = function() {
@@ -813,6 +976,30 @@ HTML_TEMPLATE = """
             }
             
             document.getElementById('otpSection').classList.add('hidden');
+        }
+
+        function switchBookingType(type) {
+            currentBookingType = type;
+            document.getElementById('bookingType').value = type;
+            
+            // Update active tab
+            document.querySelectorAll('.booking-type-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            document.getElementById(`${type}Tab`).classList.add('active');
+            
+            // Show/hide pricing info
+            document.querySelectorAll('.pricing-info').forEach(info => {
+                info.classList.add('hidden');
+            });
+            
+            document.getElementById(`${type}PricingInfo`).classList.remove('hidden');
+            
+            // Update fare calculation if route is already set
+            if (pickupCoords && destinationCoords) {
+                calculateFare();
+            }
         }
 
         function checkAuthStatus() {
@@ -842,6 +1029,11 @@ HTML_TEMPLATE = """
             // Pre-fill customer name if available
             if (user.name) {
                 document.getElementById('customerName').value = user.name;
+            }
+            
+            // Pre-fill phone number if available
+            if (user.phone) {
+                document.getElementById('customerPhone').value = user.phone;
             }
         }
 
@@ -1260,38 +1452,94 @@ HTML_TEMPLATE = """
         }
 
         function calculateFare() {
-            const carType = document.getElementById('carType').value;
-            const tripType = document.getElementById('tripType').value;
+            const bookingType = document.getElementById('bookingType').value;
+            const startTime = document.getElementById('startTime').value;
+            const endTime = document.getElementById('endTime').value;
             
-            if (!carType || !tripType || estimatedDistance === 0) return;
+            if (!bookingType || !startTime || !endTime || estimatedDistance === 0) return;
 
-            const baseRate = 15; // Base rate per km
-            const carMultiplier = getCarTypeMultiplier(carType);
-            const tripMultiplier = getTripTypeMultiplier(tripType);
-            const totalFare = Math.round(estimatedDistance * baseRate * carMultiplier * tripMultiplier);
+            let fare = 0;
+            let baseRate = 0;
+            let additionalCharges = 0;
+            let additionalLabel = "Additional Charges";
+            
+            // Calculate fare based on booking type
+            if (bookingType.startsWith('hourly')) {
+                // Base rate for 8 hours
+                baseRate = 800;
+                
+                // Calculate total hours
+                let startHour = parseInt(startTime.split(":")[0]);
+                let endHour = parseInt(endTime.split(":")[0]);
+                
+                // Handle overnight bookings
+                if (endHour < startHour) {
+                    endHour += 24;
+                }
+                
+                const totalHours = endHour - startHour;
+                
+                // Calculate overtime charges
+                if (totalHours > 8) {
+                    const overtimeHours = totalHours - 8;
+                    additionalCharges = overtimeHours * 100;
+                    additionalLabel = "Overtime Charges";
+                    
+                    // Check for night charges (after 10pm)
+                    if (endHour >= 22) {
+                        additionalCharges += 200; // Food charge
+                        
+                        // Check for late night charges (after 12am)
+                        if (endHour >= 24) {
+                            additionalCharges += 100; // Travel charge
+                        }
+                    }
+                }
+                
+                fare = baseRate + additionalCharges;
+                
+            } else if (bookingType.startsWith('outstation_overnight')) {
+                baseRate = 1500;
+                fare = baseRate;
+                additionalCharges = 0;
+                additionalLabel = "Food Expense";
+                
+            } else if (bookingType.startsWith('outstation_same_day')) {
+                baseRate = 1800;
+                fare = baseRate;
+                additionalCharges = 0;
+                
+            } else if (bookingType.startsWith('pickup_drop')) {
+                if (estimatedDistance > 100) {
+                    baseRate = 1300;
+                    additionalCharges = (estimatedDistance - 100) * 10; // 10₹ per km for additional distance
+                    additionalLabel = "Travel Charges";
+                    fare = baseRate + additionalCharges;
+                } else if (estimatedDistance > 60) {
+                    baseRate = 1000;
+                    fare = baseRate;
+                    additionalCharges = 0;
+                } else {
+                    baseRate = 800;
+                    fare = baseRate;
+                    additionalCharges = 0;
+                }
+            }
 
-            document.getElementById('baseRateDisplay').textContent = `$${baseRate}/km`;
-            document.getElementById('multiplierDisplay').textContent = `${carMultiplier}x`;
-            document.getElementById('tripMultiplierDisplay').textContent = `${tripMultiplier}x`;
-            document.getElementById('totalFareDisplay').textContent = `$${totalFare}`;
-        }
-
-        function getCarTypeMultiplier(carType) {
-            const multipliers = {
-                "Manual": 1.0,
-                "Automatic": 1.2,
-                "Semi-Automatic": 1.3,
-                "Electric": 1.5
-            };
-            return multipliers[carType] || 1.0;
-        }
-        
-        function getTripTypeMultiplier(tripType) {
-            const multipliers = {
-                "Mumbai": 1.0,
-                "Outstation": 1.5
-            };
-            return multipliers[tripType] || 1.0;
+            document.getElementById('baseRateDisplay').textContent = `₹${baseRate}`;
+            
+            if (additionalCharges > 0) {
+                document.getElementById('additionalChargesLabel').textContent = additionalLabel + ":";
+                document.getElementById('additionalChargesDisplay').textContent = `₹${additionalCharges}`;
+                document.getElementById('additionalChargesRow').classList.remove('hidden');
+            } else {
+                document.getElementById('additionalChargesRow').classList.add('hidden');
+            }
+            
+            document.getElementById('totalFareDisplay').textContent = `₹${fare}`;
+            
+            // Store fare for booking
+            currentBookingData.estimated_fare = fare;
         }
 
         // Validate time selection
@@ -1303,6 +1551,8 @@ HTML_TEMPLATE = """
                 if (startTime >= endTime) {
                     showError('End time must be after start time');
                     this.value = '';
+                } else {
+                    calculateFare();
                 }
             }
         });
@@ -1331,6 +1581,13 @@ HTML_TEMPLATE = """
             // Validate addresses
             if (!pickupCoords || !destinationCoords) {
                 showError('Please select valid pickup and destination addresses');
+                return;
+            }
+            
+            // Validate phone number
+            const phoneNumber = document.getElementById('customerPhone').value;
+            if (!phoneNumber) {
+                showError('Please enter your phone number for driver contact');
                 return;
             }
             
@@ -1375,10 +1632,6 @@ HTML_TEMPLATE = """
 
             drivers.forEach(driver => {
                 const carType = currentBookingData.carType;
-                const tripType = currentBookingData.tripType;
-                const carMultiplier = getCarTypeMultiplier(carType);
-                const tripMultiplier = getTripTypeMultiplier(tripType);
-                const hourlyRate = Math.round(driver.base_rate * carMultiplier * tripMultiplier);
                 
                 if (driver.car_types.includes(carType)) {
                     const driverCard = document.createElement('div');
@@ -1392,9 +1645,9 @@ HTML_TEMPLATE = """
                             </div>
                         </div>
                         <div style="margin-bottom: 15px;">
-                            <div style="color: #666; font-style: italic; margin-bottom: 10px;">${driver.car}</div>
-                            <div class="price">$${hourlyRate}/hour</div>
-                            <div style="font-size: 14px; color: #888;">Supports: ${driver.car_types.join(', ')}</div>
+                            <div style="color: #666; font-style: italic; margin-bottom: 10px;">Supports: ${driver.car_types.join(', ')}</div>
+                            <div class="price">₹${currentBookingData.estimated_fare}</div>
+                            <div style="font-size: 14px; color: #888;">Booking Type: ${currentBookingData.bookingType.replace('_', ' ').toUpperCase()}</div>
                         </div>
                         <button class="book-btn" onclick="bookDriver('${driver._id}')">
                             Book This Driver
@@ -1470,10 +1723,10 @@ HTML_TEMPLATE = """
                     <div><strong>To:</strong> ${booking.destination}</div>
                     <div><strong>Date:</strong> ${booking.date}</div>
                     <div><strong>Time:</strong> ${booking.time}</div>
-                    <div><strong>Trip Type:</strong> ${booking.tripType || 'N/A'}</div>
-                    <div><strong>Car Type:</strong> ${booking.car_type}</div>
+                    <div><strong>Booking Type:</strong> ${booking.bookingType ? booking.bookingType.replace('_', ' ').toUpperCase() : 'N/A'}</div>
+                    <div><strong>Car Type:</strong> ${booking.carType}</div>
                     <div><strong>Distance:</strong> ${booking.distance ? booking.distance.toFixed(1) + ' km' : 'N/A'}</div>
-                    <div><strong>Estimated Fare:</strong> $${booking.estimated_fare || 'N/A'}</div>
+                    <div><strong>Estimated Fare:</strong> ₹${booking.estimated_fare || 'N/A'}</div>
                 </div>
             `).join('');
         }
@@ -1764,13 +2017,15 @@ def book_driver():
         # Get current user
         user = get_current_user()
         
-        # Calculate fare
-        car_type = data.get('carType')
-        trip_type = data.get('tripType')
+        # Get booking details
+        booking_type = data.get('bookingType')
         distance = data.get('distance', 0)
-        car_multiplier = CAR_TYPE_MULTIPLIERS.get(car_type, 1.0)
-        trip_multiplier = TRIP_TYPES.get(trip_type, 1.0)
-        estimated_fare = round(distance * driver['base_rate'] * car_multiplier * trip_multiplier) if distance else 0
+        start_time = data.get('startTime', '')
+        end_time = data.get('endTime', '')
+        
+        # Calculate fare
+        fare_details = calculate_fare(booking_type, distance, 0, start_time, end_time)
+        estimated_fare = fare_details.get('total_fare', 0)
         
         # Create booking
         booking = {
@@ -1780,12 +2035,13 @@ def book_driver():
             'pickup': data['pickup'],
             'destination': data['destination'],
             'date': data['date'],
-            'time': data['time'],
-            'car_type': data['carType'],
-            'tripType': data['tripType'],
+            'time': data.get('time', f"{start_time} - {end_time}"),
+            'carType': data['carType'],
+            'bookingType': booking_type,
             'distance': distance,
             'duration': data.get('duration', 0),
             'estimated_fare': estimated_fare,
+            'customer_phone': data.get('customerPhone', ''),
             'status': 'confirmed',
             'created_at': datetime.utcnow()
         }
@@ -1797,17 +2053,17 @@ def book_driver():
 
 📋 Booking ID: {booking_id}
 👤 Customer: {data['customerName']}
-📱 Phone: {user.get('phone', 'N/A')}
+📱 Phone: {data.get('customerPhone', 'N/A')}
 📧 Email: {user.get('email', 'N/A')}
 🚗 Driver: {driver['name']}
 🏠 Pickup: {data['pickup']}
 🎯 Destination: {data['destination']}
 📅 Date: {data['date']}
-⏰ Time: {data['time']}
+⏰ Time: {data.get('time', f"{start_time} - {end_time}")}
 🚙 Car Type: {data['carType']}
-🌍 Trip Type: {data['tripType']}
+📊 Booking Type: {booking_type.replace('_', ' ').upper()}
 📏 Distance: {distance:.1f} km
-💰 Estimated Fare: ${estimated_fare}
+💰 Estimated Fare: ₹{estimated_fare}
 
 Please confirm this booking with the customer and driver."""
         
@@ -1830,10 +2086,10 @@ Driver: {driver['name']}
 Pickup: {data['pickup']}
 Destination: {data['destination']}
 Date: {data['date']}
-Time: {data['time']}
+Time: {data.get('time', f"{start_time} - {end_time}")}
 Car Type: {data['carType']}
-Trip Type: {data['tripType']}
-Estimated Fare: ${estimated_fare}
+Booking Type: {booking_type.replace('_', ' ').upper()}
+Estimated Fare: ₹{estimated_fare}
 
 Thank you for using RideBooker!
 """)
