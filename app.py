@@ -44,7 +44,7 @@ serializer = URLSafeTimedSerializer(app.secret_key)
 
 # Telegram Bot configuration
 TELEGRAM_BOT_TOKEN = "8124516129:AAH7xG560dYJOxT5WKLRryFfH6PIAiFysVo"  # Replace with your actual bot token
-TELEGRAM_ADMIN_CHAT_ID = "1372796454"  # Replace with your admin chat ID
+TELEGRAM_ADMIN_CHAT_ID = "1372796454cc"  # Replace with your admin chat ID
 
 # New pricing structure
 PRICING = {
@@ -1290,78 +1290,6 @@ HTML_TEMPLATE = """
             document.getElementById('invoiceSection').classList.add('hidden');
             document.getElementById('bookingSection').classList.remove('hidden');
         }
-        async function verifyOTP() {
-    const otp = document.getElementById('otpInput').value;
-    if (!otp || otp.length !== 6) {
-        showAuthError('Please enter a valid 6-digit OTP');
-        return;
-    }
-
-    let data = {
-        email: document.getElementById('userEmail').value,
-        otp: otp
-    };
-
-    try {
-        const response = await fetch('/verify_otp', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(data)
-        });
-
-        const result = await response.json();
-        if (result.success && result.new_user) {
-            // Show phone input for new user
-            document.getElementById('otpSection').classList.add('hidden');
-            document.getElementById('phoneSection').classList.remove('hidden');
-            document.getElementById('phoneSection').innerHTML = `
-                <div class="form-group">
-                    <label for="newUserPhone">Enter Your Phone Number</label>
-                    <input type="tel" id="newUserPhone" placeholder="+1234567890" required>
-                </div>
-                <div style="text-align: center;">
-                    <button class="btn" onclick="registerPhone()">Register</button>
-                </div>
-            `;
-            showAuthSuccess('OTP verified! Please enter your phone number to complete registration.');
-        } else if (result.success) {
-            showAuthSuccess('Login successful!');
-            setTimeout(() => {
-                checkAuthStatus();
-            }, 1000);
-        } else {
-            showAuthError(result.message);
-        }
-    } catch (error) {
-        showAuthError('Verification failed. Please try again.');
-    }
-}
-
-async function registerPhone() {
-    const phone = document.getElementById('newUserPhone').value;
-    if (!phone) {
-        showAuthError('Please enter your phone number');
-        return;
-    }
-    try {
-        const response = await fetch('/register_phone', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone: phone })
-        });
-        const result = await response.json();
-        if (result.success) {
-            showAuthSuccess('Registration complete! Logging you in...');
-            setTimeout(() => {
-                checkAuthStatus();
-            }, 1000);
-        } else {
-            showAuthError(result.message);
-        }
-    } catch (error) {
-        showAuthError('Registration failed. Please try again.');
-    }
-}
 
         async function sendEmailOTP() {
             const email = document.getElementById('userEmail').value;
@@ -1618,47 +1546,100 @@ async function registerPhone() {
         }
         
         async function searchAddress(query, suggestionsElement, onSelect) {
-    try {
-        // Add a custom user agent as required by Nominatim usage policy
-        const headers = {
-            'User-Agent': 'RideBookerApp/1.0'
-        };
-
-        // Restrict search to India and bias to India's bounding box
-        const params = new URLSearchParams({
-            q: query,
-            format: 'json',
-            limit: 5,
-            countrycodes: 'in',
-            viewbox: '68.1766451354,35.4940095078,97.4025614766,8.0689259164', // India's bounding box: left,top,right,bottom
-            bounded: 1
-        });
-
-        const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, { headers });
-        const data = await response.json();
-
-        if (data && data.length > 0) {
-            suggestionsElement.innerHTML = '';
-
-            data.forEach(address => {
-                const div = document.createElement('div');
-                div.className = 'address-suggestion';
-                div.textContent = address.display_name;
-                div.addEventListener('click', () => {
-                    onSelect(address);
+            try {
+                // Add a custom user agent as required by Nominatim usage policy
+                const headers = {
+                    'User-Agent': 'RideBookerApp/1.0'
+                };
+                
+                const params = new URLSearchParams({
+                    q: query,
+                    format: 'json',
+                    limit: 5
                 });
-                suggestionsElement.appendChild(div);
-            });
-
-            suggestionsElement.classList.remove('hidden');
-        } else {
-            suggestionsElement.classList.add('hidden');
+                
+                const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, { headers });
+                const data = await response.json();
+                
+                if (data && data.length > 0) {
+                    suggestionsElement.innerHTML = '';
+                    
+                    data.forEach(address => {
+                        const div = document.createElement('div');
+                        div.className = 'address-suggestion';
+                        div.textContent = address.display_name;
+                        div.addEventListener('click', () => {
+                            onSelect(address);
+                        });
+                        suggestionsElement.appendChild(div);
+                    });
+                    
+                    suggestionsElement.classList.remove('hidden');
+                } else {
+                    suggestionsElement.classList.add('hidden');
+                }
+            } catch (error) {
+                console.error('Error searching address:', error);
+                suggestionsElement.classList.add('hidden');
+            }
         }
-    } catch (error) {
-        console.error('Error searching address:', error);
-        suggestionsElement.classList.add('hidden');
-    }
-}
+        
+        function updateRoute() {
+            if (pickupCoords && destinationCoords) {
+                // Remove previous routing control if it exists
+                if (routingControl._map) {
+                    map.removeControl(routingControl);
+                }
+                
+                // Create new routing control with the coordinates
+                routingControl = L.Routing.control({
+                    waypoints: [
+                        L.latLng(pickupCoords[0], pickupCoords[1]),
+                        L.latLng(destinationCoords[0], destinationCoords[1])
+                    ],
+                    routeWhileDragging: false,
+                    showAlternatives: false,
+                    fitSelectedRoutes: true,
+                    lineOptions: {
+                        styles: [{ color: '#6366F1', weight: 6 }]
+                    },
+                    createMarker: function(i, waypoint, n) {
+                        const marker = L.marker(waypoint.latLng, {
+                            draggable: true,
+                            icon: L.icon({
+                                iconUrl: i === 0 
+                                    ? 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png' 
+                                    : 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+                                iconSize: [25, 41],
+                                iconAnchor: [12, 41],
+                                popupAnchor: [1, -34],
+                                shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+                                shadowSize: [41, 41]
+                            })
+                        });
+                        return marker;
+                    }
+                }).addTo(map);
+                
+                // Listen for route calculation events
+                routingControl.on('routesfound', function(e) {
+                    const routes = e.routes;
+                    const summary = routes[0].summary;
+                    
+                    // Update distance and duration
+                    estimatedDistance = summary.totalDistance / 1000; // Convert to km
+                    estimatedDuration = summary.totalTime / 60; // Convert to minutes
+                    
+                    document.getElementById('distanceDisplay').textContent = `${estimatedDistance.toFixed(1)} km`;
+                    document.getElementById('durationDisplay').textContent = `${Math.round(estimatedDuration)} min`;
+                });
+                
+                // If routing fails, use our backend route calculation
+                routingControl.on('routingerror', function(e) {
+                    calculateRouteFromBackend();
+                });
+            }
+        }
         
         async function calculateRouteFromBackend() {
             if (!pickupCoords || !destinationCoords) return;
@@ -1810,32 +1791,10 @@ async function registerPhone() {
             }
             
             // Check if fare has been calculated
-           if (Object.keys(fareDetails).length === 0) {
-    // Calculate fare before proceeding
-    try {
-        const bookingType = document.getElementById('bookingType').value;
-        const startTime = document.getElementById('startTime').value;
-        const endTime = document.getElementById('endTime').value;
-        const numDays = parseInt(document.getElementById('numDays').value) || 1;
-
-        const fareResponse = await fetch('/calculate_fare', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                booking_type: bookingType,
-                distance: estimatedDistance,
-                duration: estimatedDuration,
-                start_time: startTime,
-                end_time: endTime,
-                num_days: numDays
-            })
-        });
-        fareDetails = await fareResponse.json();
-    } catch (error) {
-        showError('Failed to calculate fare. Please try again.');
-        return;
-    }
-}
+            if (Object.keys(fareDetails).length === 0) {
+                showError('Please click "Know Rate" to calculate fare before submitting');
+                return;
+            }
             
             searchText.classList.add('hidden');
             searchLoading.classList.remove('hidden');
@@ -2069,114 +2028,48 @@ async function registerPhone() {
             }
         }
 
-       function displayBookings(bookings) {
-    const bookingsList = document.getElementById('bookingsList');
-    if (bookings.length === 0) {
-        bookingsList.innerHTML = '<p style="text-align: center; color: #666;">No bookings yet. Book a driver to see your reservations here.</p>';
-        return;
-    }
+        function displayBookings(bookings) {
+            const bookingsList = document.getElementById('bookingsList');
+            
+            if (bookings.length === 0) {
+                bookingsList.innerHTML = '<p style="text-align: center; color: #666;">No bookings yet. Book a driver to see your reservations here.</p>';
+                return;
+            }
 
-    bookingsList.innerHTML = bookings.map(booking => {
-        // Format booking type for display
-        let bookingTypeDisplay = booking.bookingType || 'N/A';
-        if (bookingTypeDisplay === 'hourly') {
-            bookingTypeDisplay = 'Hourly Basis';
-        } else if (bookingTypeDisplay === 'outstation_overnight') {
-            bookingTypeDisplay = 'Outstation (Overnight)';
-        } else if (bookingTypeDisplay === 'outstation_same_day') {
-            bookingTypeDisplay = 'Outstation (Same Day)';
-        } else if (bookingTypeDisplay === 'pickup_drop') {
-            bookingTypeDisplay = 'Pickup & Drop';
+            bookingsList.innerHTML = bookings.map(booking => {
+                // Format booking type for display
+                let bookingTypeDisplay = booking.bookingType || 'N/A';
+                if (bookingTypeDisplay === 'hourly') {
+                    bookingTypeDisplay = 'Hourly Basis';
+                } else if (bookingTypeDisplay === 'outstation_overnight') {
+                    bookingTypeDisplay = 'Outstation (Overnight)';
+                } else if (bookingTypeDisplay === 'outstation_same_day') {
+                    bookingTypeDisplay = 'Outstation (Same Day)';
+                } else if (bookingTypeDisplay === 'pickup_drop') {
+                    bookingTypeDisplay = 'Pickup & Drop';
+                }
+                
+                return `
+                <div class="booking-item">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <strong>Booking #${booking._id.substring(0, 8)}</strong>
+                        <span style="background: #d4edda; color: #155724; padding: 5px 15px; border-radius: 20px; font-size: 12px; font-weight: 600;">${booking.status.toUpperCase()}</span>
+                    </div>
+                    <div><strong>From:</strong> ${booking.pickup}</div>
+                    <div><strong>To:</strong> ${booking.destination}</div>
+                    <div><strong>Date:</strong> ${booking.date}</div>
+                    <div><strong>Time:</strong> ${booking.time}</div>
+                    <div><strong>Booking Type:</strong> ${bookingTypeDisplay}</div>
+                    <div><strong>Car Type:</strong> ${booking.carType}</div>
+                    <div><strong>Distance:</strong> ${booking.distance ? booking.distance.toFixed(1) + ' km' : 'N/A'}</div>
+                    <div><strong>Estimated Fare:</strong> ₹${booking.estimated_fare || 'N/A'}</div>
+                    <div style="margin-top: 10px;">
+                        <button class="btn" style="padding: 8px 15px; font-size: 14px;" onclick="downloadBookingInvoice('${booking._id}')">Download Invoice</button>
+                    </div>
+                </div>
+            `}).join('');
         }
 
-        return `
-        <div class="booking-item" id="booking-${booking._id}">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                <strong>Booking #${booking._id.substring(0, 8)}</strong>
-                <span style="background: #d4edda; color: #155724; padding: 5px 15px; border-radius: 20px; font-size: 12px; font-weight: 600;">${booking.status.toUpperCase()}</span>
-            </div>
-            <div><strong>From:</strong> ${booking.pickup}</div>
-            <div><strong>To:</strong> ${booking.destination}</div>
-            <div><strong>Date:</strong> ${booking.date}</div>
-            <div><strong>Time:</strong> ${booking.time}</div>
-            <div><strong>Booking Type:</strong> ${bookingTypeDisplay}</div>
-            <div><strong>Car Type:</strong> ${booking.carType}</div>
-            <div><strong>Distance:</strong> ${booking.distance ? booking.distance.toFixed(1) + ' km' : 'N/A'}</div>
-            <div><strong>Estimated Fare:</strong> ₹${booking.estimated_fare || 'N/A'}</div>
-            <div style="margin-top: 10px;">
-                <button class="btn" style="padding: 8px 15px; font-size: 14px;" onclick="downloadBookingInvoice('${booking._id}')">Download Invoice</button>
-                <button class="btn btn-secondary" style="padding: 8px 15px; font-size: 14px; margin-left: 5px;" onclick="showModifyBooking('${booking._id}')">Modify</button>
-                <button class="btn btn-secondary" style="padding: 8px 15px; font-size: 14px; margin-left: 5px; background:#dc3545;" onclick="deleteBooking('${booking._id}')">Delete</button>
-            </div>
-        </div>
-        `;
-    }).join('');
-}
-
-// Delete booking handler
-async function deleteBooking(bookingId) {
-    if (!confirm('Are you sure you want to delete this booking?')) return;
-    try {
-        const response = await fetch(`/delete_booking/${bookingId}`, { method: 'DELETE' });
-        const result = await response.json();
-        if (result.success) {
-            document.getElementById(`booking-${bookingId}`).remove();
-            showSuccess('Booking deleted successfully.');
-        } else {
-            showError(result.message || 'Failed to delete booking.');
-        }
-    } catch (error) {
-        showError('Failed to delete booking.');
-    }
-}
-
-// Modify booking handler (show form pre-filled with booking data)
-async function showModifyBooking(bookingId) {
-    try {
-        const response = await fetch(`/get_booking/${bookingId}`);
-        const booking = await response.json();
-        if (!booking || !booking._id) {
-            showError('Booking not found.');
-            return;
-        }
-        // Pre-fill booking form
-        document.getElementById('pickup').value = booking.pickup;
-        document.getElementById('destination').value = booking.destination;
-        document.getElementById('date').value = booking.date;
-        document.getElementById('carType').value = booking.carType;
-        document.getElementById('bookingType').value = booking.bookingType;
-        document.getElementById('startTime').value = booking.time.split(' - ')[0];
-        document.getElementById('endTime').value = booking.time.split(' - ')[1];
-        document.getElementById('customerName').value = booking.customerName;
-        document.getElementById('customerPhone').value = booking.customerPhone;
-        if (booking.bookingType === 'outstation_overnight') {
-            document.getElementById('numDays').value = booking.numDays;
-            document.getElementById('numDaysGroup').classList.remove('hidden');
-        } else {
-            document.getElementById('numDaysGroup').classList.add('hidden');
-        }
-        // Set coords for map/routing
-        pickupCoords = booking.pickup_coords || null;
-        destinationCoords = booking.destination_coords || null;
-        // Store bookingId for update
-        currentBookingData._id = booking._id;
-        // Show booking section
-        showMainApp();
-        showSuccess('Edit the details and submit to update your booking.');
-    } catch (error) {
-        showError('Failed to load booking for modification.');
-    }
-}
-
-// In your bookingForm submit handler, add bookingId if modifying
-document.getElementById('bookingForm').addEventListener('submit', async function(e) {
-    // ...existing code...
-    if (currentBookingData._id) {
-        currentBookingData.bookingId = currentBookingData._id;
-        delete currentBookingData._id;
-    }
-    // ...existing code...
-});
         function downloadBookingInvoice(bookingId) {
             window.open(`/download_booking_invoice/${bookingId}`, '_blank');
         }
@@ -2223,10 +2116,6 @@ document.getElementById('bookingForm').addEventListener('submit', async function
 @app.route('/')
 def index():
     return render_template_string(HTML_TEMPLATE)
-@app.route('/test_telegram')
-def test_telegram():
-    result = send_telegram_message(TELEGRAM_ADMIN_CHAT_ID, "Test message from RideBooker app.")
-    return jsonify(result)
 
 @app.route('/check_auth')
 def check_auth():
@@ -2242,62 +2131,7 @@ def check_auth():
             }
         })
     return jsonify({'authenticated': False})
-@app.route('/delete_booking/<booking_id>', methods=['DELETE'])
-def delete_booking(booking_id):
-    if not is_authenticated():
-        return jsonify({'success': False, 'message': 'Not authenticated'}), 401
-    user = get_current_user()
-    result = mongo.db.bookings.delete_one({'_id': ObjectId(booking_id), 'user_id': user['_id']})
-    if result.deleted_count == 1:
-        return jsonify({'success': True})
-    return jsonify({'success': False, 'message': 'Booking not found or not allowed'})
 
-@app.route('/get_booking/<booking_id>', methods=['GET'])
-def get_booking(booking_id):
-    if not is_authenticated():
-        return jsonify({'success': False, 'message': 'Not authenticated'}), 401
-    user = get_current_user()
-    booking = mongo.db.bookings.find_one({'_id': ObjectId(booking_id), 'user_id': user['_id']})
-    if not booking:
-        return jsonify({'success': False, 'message': 'Booking not found'})
-    booking['_id'] = str(booking['_id'])
-    booking['user_id'] = str(booking['user_id'])
-    return jsonify(booking)
-
-@app.route('/modify_booking/<booking_id>', methods=['POST'])
-def modify_booking(booking_id):
-    if not is_authenticated():
-        return jsonify({'success': False, 'message': 'Not authenticated'}), 401
-    try:
-        data = request.get_json()
-        booking_data = data.get('booking_data', {})
-        fare_details = data.get('fare_details', {})
-        user = get_current_user()
-        update_fields = {
-            'pickup': booking_data.get('pickup', ''),
-            'destination': booking_data.get('destination', ''),
-            'date': booking_data.get('date', ''),
-            'time': booking_data.get('time', ''),
-            'carType': booking_data.get('carType', ''),
-            'bookingType': booking_data.get('bookingType', ''),
-            'numDays': int(booking_data.get('numDays', 1)),
-            'distance': booking_data.get('distance', 0),
-            'duration': booking_data.get('duration', 0),
-            'estimated_fare': fare_details.get('total_fare', 0),
-            'customerName': booking_data.get('customerName', ''),
-            'customerPhone': booking_data.get('customerPhone', ''),
-            'modified_at': datetime.utcnow()
-        }
-        result = mongo.db.bookings.update_one(
-            {'_id': ObjectId(booking_id), 'user_id': user['_id']},
-            {'$set': update_fields}
-        )
-        if result.modified_count == 1:
-            return jsonify({'success': True, 'message': 'Booking updated successfully'})
-        return jsonify({'success': False, 'message': 'Booking not found or not allowed'})
-    except Exception as e:
-        print(f"Error modifying booking: {e}")
-        return jsonify({'success': False, 'message': 'Failed to update booking'})
 @app.route('/send_email_otp', methods=['POST'])
 def send_email_otp():
     try:
@@ -2396,39 +2230,67 @@ def verify_otp():
     try:
         data = request.get_json()
         email = data.get('email')
+        phone = data.get('phone')
         entered_otp = data.get('otp')
-
+        
         if not entered_otp:
             return jsonify({'success': False, 'message': 'OTP is required'})
-
-        otp_record = mongo.db.otps.find_one({'email': email})
+        
+        # Find OTP in database
+        otp_record = None
+        if email:
+            otp_record = mongo.db.otps.find_one({'email': email})
+        elif phone:
+            otp_record = mongo.db.otps.find_one({'phone': phone})
+        
         if not otp_record:
             return jsonify({'success': False, 'message': 'OTP not found or expired'})
-
+        
+        # Check if OTP is expired (5 minutes)
         if datetime.utcnow() - otp_record['timestamp'] > timedelta(minutes=5):
             mongo.db.otps.delete_one({'_id': otp_record['_id']})
             return jsonify({'success': False, 'message': 'OTP expired'})
-
+        
+        # Check attempts
         if otp_record['attempts'] >= 3:
             mongo.db.otps.delete_one({'_id': otp_record['_id']})
             return jsonify({'success': False, 'message': 'Too many failed attempts'})
-
+        
+        # Verify OTP
         if otp_record['otp'] == entered_otp:
-            user = mongo.db.users.find_one({'email': email})
-            if not user:
-                mongo.db.otps.delete_one({'_id': otp_record['_id']})
-                session['pending_email'] = email
-                return jsonify({'success': True, 'new_user': True, 'message': 'OTP verified. Please enter your phone number.'})
-            else:
-                session['user_id'] = str(user['_id'])
-                mongo.db.otps.delete_one({'_id': otp_record['_id']})
-                return jsonify({'success': True, 'new_user': False, 'message': 'Login successful'})
+            # Check if user exists
+            user = None
+            if email:
+                user = mongo.db.users.find_one({'email': email})
+                if not user:
+                    user_id = mongo.db.users.insert_one({
+                        'email': email,
+                        'created_at': datetime.utcnow()
+                    }).inserted_id
+                    user = mongo.db.users.find_one({'_id': user_id})
+            elif phone:
+                user = mongo.db.users.find_one({'phone': phone})
+                if not user:
+                    user_id = mongo.db.users.insert_one({
+                        'phone': phone,
+                        'created_at': datetime.utcnow()
+                    }).inserted_id
+                    user = mongo.db.users.find_one({'_id': user_id})
+            
+            # Set user in session
+            session['user_id'] = str(user['_id'])
+            
+            # Delete the OTP record
+            mongo.db.otps.delete_one({'_id': otp_record['_id']})
+            
+            return jsonify({'success': True, 'message': 'Login successful'})
         else:
             mongo.db.otps.update_one(
                 {'_id': otp_record['_id']},
                 {'$inc': {'attempts': 1}}
             )
             return jsonify({'success': False, 'message': 'Invalid OTP'})
+            
     except Exception as e:
         print(f"Error verifying OTP: {str(e)}")
         return jsonify({'success': False, 'message': 'Verification failed'})
@@ -2437,28 +2299,7 @@ def verify_otp():
 def logout():
     session.clear()
     return jsonify({'success': True})
-@app.route('/register_phone', methods=['POST'])
-def register_phone():
-    try:
-        data = request.get_json()
-        phone = data.get('phone')
-        if not phone:
-            return jsonify({'success': False, 'message': 'Phone number is required'})
-        email = session.get('pending_email')
-        if not email:
-            return jsonify({'success': False, 'message': 'Session expired. Please login again.'})
-        # Save new user
-        user_id = mongo.db.users.insert_one({
-            'email': email,
-            'phone': phone,
-            'created_at': datetime.utcnow()
-        }).inserted_id
-        session['user_id'] = str(user_id)
-        session.pop('pending_email', None)
-        return jsonify({'success': True, 'message': 'Registration complete'})
-    except Exception as e:
-        print(f"Error registering phone: {str(e)}")
-        return jsonify({'success': False, 'message': 'Registration failed'})
+
 @app.route('/calculate_route', methods=['POST'])
 def calculate_route():
     """Calculate route using OpenStreetMap Routing Machine (OSRM)"""
